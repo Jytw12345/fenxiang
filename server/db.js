@@ -50,7 +50,16 @@ async function getUserBySupabaseId(sub) {
 // 确保 Supabase 用户存在（首登自动建行 + 归属组织）。返回用户行或 { error }。
 async function ensureUser({ sub, email, inviteCode }) {
   const exist = await getUserBySupabaseId(sub);
-  if (exist) return exist;
+  if (exist) {
+    // 已存在用户：若邮箱在超级管理员名单内且尚未标记，则同步提权。
+    // 否则旧版已注册的老账号在新版上线后永远不会变成超级管理员。
+    if (config.SUPER_ADMIN_EMAILS.includes(String(email || '').toLowerCase()) && !exist.is_super) {
+      await setUserSuper(exist.id, 1);
+      const refreshed = await getUser(exist.id);
+      return refreshed || exist;
+    }
+    return exist;
+  }
   const domain = (String(email || '').split('@')[1] || '').toLowerCase();
   let orgId = null, role = 'member';
   if (inviteCode) {
