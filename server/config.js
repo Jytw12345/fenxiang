@@ -13,6 +13,9 @@ module.exports = {
   // 注册域名限制（可选）：设置后仅允许该域名邮箱自助注册；首个注册者成为店长并创建组织。
   // 留空则为开放多租户模式（任意域名首个注册者各自创建独立组织）。
   REGISTER_DOMAIN: str(process.env.REGISTER_DOMAIN, '').toLowerCase(),
+  // 超级管理员邮箱（可选，逗号分隔）：这些账号注册/首登时自动成为全局超级管理员。
+  // 同时，系统首个注册用户也会自动成为超级管理员（便于初始开通）。
+  SUPER_ADMIN_EMAILS: str(process.env.SUPER_ADMIN_EMAILS, '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
   // 源文件在线预览：默认开启。设为 0 可关闭（全部转为仅下载）。
   PREVIEW_ENABLED: (str(process.env.PREVIEW_ENABLED, '1') !== '0'),
   // 单个文件预览转换超时（毫秒），默认 60s。超时被杀并降级为仅下载。

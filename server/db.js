@@ -23,9 +23,13 @@ function isReady() { return !!drv; }
 function driverType() { return drv ? drv.type : null; }
 
 // ---------- 用户与令牌 ----------
-async function createUser({ id, email, salt, hash, openid = null, createdAt, orgId = null, role = 'member', supabaseId = null }) {
-  await drv.run('INSERT INTO users (id,email,password_hash,salt,wechat_openid,created_at,org_id,role,supabase_id) VALUES (?,?,?,?,?,?,?,?,?)',
-    [id, email, hash, salt, openid, createdAt, orgId || '', role, supabaseId || '']);
+async function createUser({ id, email, salt, hash, openid = null, createdAt, orgId = null, role = 'member', supabaseId = null, isSuper = 0 }) {
+  await drv.run('INSERT INTO users (id,email,password_hash,salt,wechat_openid,created_at,org_id,role,supabase_id,is_super,disabled) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+    [id, email, hash, salt, openid, createdAt, orgId || '', role, supabaseId || '', isSuper ? 1 : 0, 0]);
+}
+async function countUsers() {
+  const row = await drv.get('SELECT COUNT(*) AS c FROM users');
+  return row ? Number(row.c) : 0;
 }
 async function findUserByEmail(email) {
   return drv.get('SELECT * FROM users WHERE email=?', [email]) || null;
@@ -35,6 +39,9 @@ async function findUserByOpenid(openid) {
 }
 async function getUser(id) {
   return drv.get('SELECT * FROM users WHERE id=?', [id]) || null;
+}
+async function getUserByEmail(email) {
+  return findUserByEmail(email);
 }
 async function getUserBySupabaseId(sub) {
   if (!sub) return null;
@@ -66,7 +73,8 @@ async function ensureUser({ sub, email, inviteCode }) {
     }
   }
   const id = uuid();
-  await createUser({ id, email: email || '', salt: '', hash: '', openid: null, createdAt: Date.now(), orgId, role, supabaseId: sub });
+  const isSuper = (config.SUPER_ADMIN_EMAILS.includes(String(email || '').toLowerCase())) ? 1 : 0;
+  await createUser({ id, email: email || '', salt: '', hash: '', openid: null, createdAt: Date.now(), orgId, role, supabaseId: sub, isSuper });
   return getUser(id);
 }
 async function updateUserOrg({ userId, orgId, role }) {
@@ -234,11 +242,66 @@ async function listMySharesByOwnerToken(ownerToken) {
     FROM shares s WHERE s.owner_token=? ORDER BY s.created_at DESC`, [ownerToken]);
 }
 
+// ---------- 超级管理员：全局视图 ----------
+async function listAllShares() {
+  return drv.all(`SELECT s.*, u.email AS owner_email, f.size AS file_size,
+      (SELECT COUNT(*) FROM logs l WHERE l.share_id=s.id AND l.event='open') AS opens,
+      (SELECT COUNT(DISTINCT l.viewer_token) FROM logs l WHERE l.share_id=s.id AND l.event='open') AS viewers
+    FROM shares s LEFT JOIN users u ON s.owner_id=u.id LEFT JOIN files f ON s.file_id=f.id
+    ORDER BY s.created_at DESC`);
+}
+async function listAllUsers() {
+  return drv.all(`SELECT u.id, u.email, u.role, u.is_super, u.disabled, u.created_at, u.org_id,
+      (SELECT COUNT(*) FROM shares s WHERE s.owner_id=u.id) AS share_count,
+      (SELECT COALESCE(SUM(f.size),0) FROM shares s JOIN files f ON s.file_id=f.id WHERE s.owner_id=u.id) AS bytes
+    FROM users u ORDER BY bytes DESC, u.created_at ASC`);
+}
+async function setUserDisabled(id, val) { await drv.run('UPDATE users SET disabled=? WHERE id=?', [val ? 1 : 0, id]); }
+async function setUserRole(id, role) { await drv.run('UPDATE users SET role=? WHERE id=?', [role === 'admin' ? 'admin' : 'member', id]); }
+async function setUserSuper(id, val) { await drv.run('UPDATE users SET is_super=? WHERE id=?', [val ? 1 : 0, id]); }
+async function deleteUser(id) {
+  await drv.run('DELETE FROM user_tokens WHERE user_id=?', [id]);
+  await drv.run('DELETE FROM users WHERE id=?', [id]);
+}
+// 存储占用统计：总量 / 分享数 / Top 用户 / Top 分享 / 可清理孤儿文件
+async function statsStorage() {
+  const totalBytes = await drv.get('SELECT COALESCE(SUM(size),0) AS t FROM files');
+  const totalFiles = await drv.get('SELECT COUNT(*) AS c FROM files');
+  const rows = await drv.all('SELECT status, COUNT(*) AS c FROM shares GROUP BY status');
+  const byStatus = {}; rows.forEach(r => { byStatus[r.status] = Number(r.c); });
+  const topUsers = await listAllUsers(); topUsers.splice(10);
+  const topShares = await drv.all(`SELECT s.id, s.name, u.email AS owner_email, f.size AS file_size
+      FROM shares s LEFT JOIN users u ON s.owner_id=u.id LEFT JOIN files f ON s.file_id=f.id
+      ORDER BY f.size DESC LIMIT 10`);
+  const orphan = await drv.get(`SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS b
+      FROM files f WHERE NOT EXISTS (SELECT 1 FROM shares s WHERE s.file_id=f.id AND s.status='active')`);
+  return {
+    totalBytes: Number(totalBytes.t), totalFiles: Number(totalFiles.c), byStatus,
+    topUsers, topShares,
+    orphanCount: Number(orphan.c), orphanBytes: Number(orphan.b)
+  };
+}
+async function orphanFiles() {
+  return drv.all(`SELECT f.id, f.stored_name, f.size FROM files f
+      WHERE NOT EXISTS (SELECT 1 FROM shares s WHERE s.file_id=f.id AND s.status='active')`);
+}
+async function deleteFileRow(id) { await drv.run('DELETE FROM files WHERE id=?', [id]); }
+async function deleteShareRow(id) { await drv.run('DELETE FROM shares WHERE id=?', [id]); }
+
+// ---------- 操作审计日志 ----------
+async function recordAudit(actorId, action, target, detail) {
+  await drv.run('INSERT INTO audit_logs (id,actor_id,action,target,detail,created_at) VALUES (?,?,?,?,?,?)',
+    [uuid(), actorId || '', action, target || '', detail || '', Date.now()]);
+}
+async function listAudit(limit = 200) {
+  return drv.all('SELECT actor_id, action, target, detail, created_at FROM audit_logs ORDER BY created_at DESC LIMIT ?', [limit]);
+}
+
 module.exports = {
   init, end, isReady, driverType, uuid,
   // users/tokens
   createUser, findUserByEmail, findUserByOpenid, createUserToken, getUserToken, getUserEmail,
-  getUser, getUserBySupabaseId, ensureUser, updateUserOrg,
+  getUser, getUserBySupabaseId, ensureUser, updateUserOrg, countUsers,
   // orgs
   createOrg, getOrg, getOrgByDomain, countOrgs, listOrgShares, listOrgMembers, createInvite, getInvite,
   // wechat
@@ -253,7 +316,12 @@ module.exports = {
   createSession, getSession, logOpen, recordProgress, getShareLogs, getPendingApprovals,
   // admin
   listMySharesById, listMySharesByOwnerToken,
+  // super admin
+  listAllShares, listAllUsers, setUserDisabled, setUserRole, setUserSuper,
+  getUserByEmail, deleteUser, statsStorage, orphanFiles, deleteFileRow, deleteShareRow, recordAudit, listAudit,
   // 直接透传底层（极少数方言无关操作）
   get: (sql, params) => drv.get(sql, params),
+  all: (sql, params) => drv.all(sql, params),
+  run: (sql, params) => drv.run(sql, params),
   UPLOAD_DIR: config.UPLOAD_DIR, DATA_DIR: config.DATA_DIR
 };

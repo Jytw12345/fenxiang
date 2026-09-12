@@ -7,19 +7,37 @@
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-<div class="wrap">
+<aside class="side">
+  <div class="brand">安全<span>分享</span></div>
+  <nav class="nav">
+    <a href="/"><span class="ic">＋</span><span class="txt">创建分享</span></a>
+    <a href="/admin.html"><span class="ic">📁</span><span class="txt">我的分享</span></a>
+    <a class="active" href="/admin.html"><span class="ic">🛡</span><span class="txt">管理后台</span></a>
+    <a href="#"><span class="ic">⚙</span><span class="txt">设置</span></a>
+  </nav>
+  <div class="me">
+    <div class="av">安</div>
+    <div><div class="me-n">安全分享</div><small>内部工作台</small></div>
+  </div>
+</aside>
+
+<div class="main">
   <div class="topbar">
-    <div class="brand">管理<span>后台</span></div>
+    <div class="crumb"><b>管理后台</b></div>
     <div class="top-right">
+      <a class="btn sm" href="/">＋ 新建分享</a>
       <span id="userArea" class="sub"></span>
-      <a class="sub" href="/">+ 新建分享</a>
     </div>
   </div>
+  <div class="wrap">
   <div class="tabs" id="tabs" style="display:none">
     <button class="tab active" data-tab="mine">我的分享</button>
     <button class="tab" data-tab="org">全店分享</button>
     <button class="tab" data-tab="members">成员</button>
     <button class="tab" data-tab="invite">邀请码</button>
+    <button class="tab" data-tab="stats" id="tabStats" style="display:none">存储用量</button>
+    <button class="tab" data-tab="users" id="tabUsers" style="display:none">用户管理</button>
+    <button class="tab" data-tab="audit" id="tabAudit" style="display:none">操作日志</button>
   </div>
 
   <div id="list"></div>
@@ -34,7 +52,14 @@
     </div>
   </div>
 
+  <div id="superPanel" style="display:none">
+    <div id="superStats" style="display:none"></div>
+    <div id="superUsers" style="display:none"></div>
+    <div id="superAudit" style="display:none"></div>
+  </div>
+
   <div class="empty" id="empty" style="display:none">还没有分享记录。<a href="/">去创建一个 →</a></div>
+  </div>
 </div>
 
 <div class="modal" id="logsModal">

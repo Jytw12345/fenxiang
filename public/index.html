@@ -7,93 +7,98 @@
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-<div class="wrap">
+<aside class="side">
+  <div class="brand">安全<span>分享</span></div>
+  <nav class="nav">
+    <a class="active" href="/"><span class="ic">＋</span><span class="txt">创建分享</span></a>
+    <a href="/admin.html"><span class="ic">📁</span><span class="txt">我的分享</span></a>
+    <a href="/admin.html"><span class="ic">🛡</span><span class="txt">管理后台</span></a>
+    <a href="#"><span class="ic">⚙</span><span class="txt">设置</span></a>
+  </nav>
+  <div class="me">
+    <div class="av">安</div>
+    <div><div class="me-n">安全分享</div><small>内部工作台</small></div>
+  </div>
+</aside>
+
+<div class="main">
   <div class="topbar">
-    <div class="brand">安全<span>分享</span></div>
-    <div class="top-right">
-      <span id="userArea" class="sub"></span>
-      <a class="sub" href="/admin.html">管理后台 →</a>
-    </div>
+    <div class="crumb">工作台 / <b>创建分享</b></div>
+    <div class="top-right"><span id="userArea" class="sub"></span></div>
   </div>
 
-  <div class="card">
-    <h2>① 选择要分享的文件</h2>
-    <div class="drop" id="drop">
-      <div>把文件拖到这里，或 <b>点击选择</b></div>
-      <div class="sub" style="margin-top:6px">支持 PDF / Word / 图片；单文件最大 200MB</div>
-    </div>
-    <input type="file" id="file" hidden />
-    <div class="fileinfo" id="fileinfo">
-      <div class="ic" id="fiIc">📄</div>
-      <div>
-        <div class="nm" id="fiNm"></div>
-        <div class="sz" id="fiSz"></div>
-      </div>
-      <a class="sub" href="#" id="fiClear" style="margin-left:auto">移除</a>
-    </div>
-  </div>
+  <div class="wrap">
+    <h1 class="page-title">创建安全分享</h1>
+    <p class="page-sub">上传文件并设置访问权限，生成加密分享链接，访客在微信中即可安全查看、限时阅读。</p>
 
-  <div class="card">
-    <h2>② 设置访问权限</h2>
-    <div class="field">
-      <label>文件名称（展示给访客）</label>
-      <input id="name" placeholder="默认使用原文件名" />
+    <div class="hero">
+      <div class="drop" id="drop">
+        <div class="icon">⬆</div>
+        <div><b>拖拽文件到此处</b>，或点击选择</div>
+        <div class="s">支持 PDF / Word / 图片 · 单文件最大 200MB · 自动生成在线预览</div>
+      </div>
+      <div class="file-pill" id="fileinfo">
+        <div class="ic" id="fiIc">📄</div>
+        <div>
+          <div class="nm" id="fiNm"></div>
+          <div class="sz" id="fiSz"></div>
+        </div>
+        <a href="#" id="fiClear">移除</a>
+      </div>
+      <input type="file" id="file" hidden />
     </div>
-    <div class="row">
+
+    <div class="sec-title">访问权限设置</div>
+    <div class="cfg">
       <div class="field">
-        <label>有效期</label>
-        <select id="expire">
-          <option value="1">1 天</option>
-          <option value="7" selected>7 天</option>
-          <option value="30">30 天</option>
-          <option value="0">永久（不自动失效）</option>
-        </select>
+        <div class="lab">文件名称</div>
+        <input id="name" placeholder="展示给访客，默认使用原文件名" />
       </div>
       <div class="field">
-        <label>访问码（留空则不设密码）</label>
-        <input id="code" placeholder="选填，访客需输入" />
-      </div>
-    </div>
-    <div class="row">
-      <div class="field">
-        <label>最大访问人数（设备数，0=不限）</label>
-        <input id="maxViewers" type="number" min="0" value="0" />
-      </div>
-      <div class="field">
-        <label>最大阅读次数（0=不限）</label>
-        <input id="maxViews" type="number" min="0" value="0" />
-      </div>
-    </div>
-    <div class="row">
-      <div class="field">
-        <label>单次阅读时长（分钟，0=不限）</label>
-        <input id="duration" type="number" min="0" value="0" />
+        <div class="lab">有效期 / 访问码</div>
+        <div class="row2">
+          <select id="expire">
+            <option value="1">1 天</option>
+            <option value="7" selected>7 天</option>
+            <option value="30">30 天</option>
+            <option value="0">永久有效</option>
+          </select>
+          <input id="code" placeholder="访问码（留空不设）" />
+        </div>
       </div>
       <div class="field">
-        <label>验证方式</label>
+        <div class="lab">验证方式</div>
         <select id="authMode">
           <option value="open">公开（任何人都可打开）</option>
-          <option value="approve">申请授权（需我批准后才能看）</option>
-          <option value="wechat">微信验证（访客需扫码确认）</option>
+          <option value="approve">申请授权（需我批准）</option>
+          <option value="wechat">微信验证（访客扫码）</option>
         </select>
       </div>
-    </div>
-    <div class="field">
-      <label>水印文字（显示在预览上的防盗用信息）</label>
-      <input id="watermark" placeholder="如：内部资料 严禁外传" />
-    </div>
-    <div class="field">
-      <label>限制访客操作</label>
-      <div class="checks">
-        <label><input type="checkbox" id="rCopy" checked /> 禁止复制</label>
-        <label><input type="checkbox" id="rPrint" checked /> 禁止打印</label>
-        <label><input type="checkbox" id="rDownload" checked /> 禁止下载</label>
-        <label><input type="checkbox" id="rScreenshot" /> 防截图（动态水印）</label>
+      <div class="field">
+        <div class="lab">访问控制 <small>0 = 不限制</small></div>
+        <div class="triple">
+          <div><div class="lab">最大人数</div><input id="maxViewers" type="number" min="0" value="0" /></div>
+          <div><div class="lab">最大次数</div><input id="maxViews" type="number" min="0" value="0" /></div>
+          <div><div class="lab">单次时长(分)</div><input id="duration" type="number" min="0" value="0" /></div>
+        </div>
+      </div>
+      <div class="field wide">
+        <div class="lab">防盗用 & 水印</div>
+        <div class="chips" style="margin-bottom:11px">
+          <label class="switch"><input type="checkbox" id="rCopy" checked /> <span>禁止复制</span></label>
+          <label class="switch"><input type="checkbox" id="rPrint" checked /> <span>禁止打印</span></label>
+          <label class="switch"><input type="checkbox" id="rDownload" checked /> <span>禁止下载</span></label>
+          <label class="switch"><input type="checkbox" id="rScreenshot" /> <span>防截图</span></label>
+        </div>
+        <input id="watermark" placeholder="水印文字（如：内部资料 严禁外传）" />
       </div>
     </div>
-  </div>
 
-  <button class="btn" id="shareBtn" style="width:100%">立即分享</button>
+    <div class="foot">
+      <button class="btn ghost">存为草稿</button>
+      <button class="btn" id="shareBtn">立即分享</button>
+    </div>
+  </div>
 </div>
 
 <div class="modal" id="result">

@@ -57,4 +57,18 @@ function publicUrl(storedName) {
   return null;
 }
 
-module.exports = { save, readBuffer, publicUrl, cosEnabled: !!cos, UPLOAD_DIR };
+// 删除：用于清理已销毁分享的文件、删除用户时释放空间
+async function del(storedName) {
+  if (cos) {
+    await new Promise((resolve, reject) => {
+      cos.deleteObject({
+        Bucket: config.COS.Bucket, Region: config.COS.Region, Key: cosKey(storedName)
+      }, (err) => err ? reject(err) : resolve());
+    });
+    return;
+  }
+  const fp = path.join(UPLOAD_DIR, storedName);
+  if (fs.existsSync(fp)) fs.unlinkSync(fp);
+}
+
+module.exports = { save, readBuffer, publicUrl, delete: del, cosEnabled: !!cos, UPLOAD_DIR };

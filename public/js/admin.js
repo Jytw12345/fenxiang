@@ -144,16 +144,30 @@ async function initOrg() {
   const tabs = $('#tabs');
   const list = $('#list');
   const orgPanel = $('#orgPanel');
+  const superPanel = $('#superPanel');
   const sub = { org: $('#orgShares'), members: $('#orgMembers'), invite: $('#orgInvite') };
+  // 超级管理员额外 tab
+  if (me.isSuper) { $('#tabStats').style.display = ''; $('#tabUsers').style.display = ''; $('#tabAudit').style.display = ''; }
   tabs.style.display = 'flex';
   document.querySelectorAll('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       const t = btn.dataset.tab;
-      if (t === 'mine') { list.style.display = 'block'; orgPanel.style.display = 'none'; load(); }
+      const superTabs = ['stats', 'users', 'audit'];
+      if (superTabs.includes(t)) {
+        list.style.display = 'none'; orgPanel.style.display = 'none'; superPanel.style.display = 'block';
+        $('#superStats').style.display = t === 'stats' ? 'block' : 'none';
+        $('#superUsers').style.display = t === 'users' ? 'block' : 'none';
+        $('#superAudit').style.display = t === 'audit' ? 'block' : 'none';
+        if (t === 'stats') loadStats();
+        if (t === 'users') loadUsers();
+        if (t === 'audit') loadAudit();
+        return;
+      }
+      if (t === 'mine') { list.style.display = 'block'; orgPanel.style.display = 'none'; superPanel.style.display = 'none'; load(); }
       else {
-        list.style.display = 'none'; orgPanel.style.display = 'block';
+        list.style.display = 'none'; orgPanel.style.display = 'block'; superPanel.style.display = 'none';
         sub.org.style.display = t === 'org' ? 'block' : 'none';
         sub.members.style.display = t === 'members' ? 'block' : 'none';
         sub.invite.style.display = t === 'invite' ? 'block' : 'none';
@@ -213,6 +227,90 @@ async function loadMembers() {
   const box = $('#orgMembers');
   box.innerHTML = !d.members || !d.members.length ? '<div class="empty">暂无成员</div>'
     : `<table><tr><th>邮箱</th><th>角色</th><th>加入时间</th></tr>${d.members.map(m => `<tr><td>${esc(m.email)}</td><td>${m.role === 'admin' ? '店长' : '员工'}</td><td>${new Date(m.createdAt).toLocaleString()}</td></tr>`).join('')}</table>`;
+}
+
+async function loadStats() {
+  const r = await fetch('/api/super/stats?userToken=' + encodeURIComponent(orgToken));
+  const d = await r.json();
+  if (d.error) { $('#superStats').innerHTML = '<div class="empty">无权访问</div>'; return; }
+  const byStatus = d.byStatus || {};
+  const topUsers = (d.topUsers || []).map(u => `<tr><td>${esc(u.email)}</td><td>${fmtBytes(u.bytes)}</td><td>${u.shareCount}</td></tr>`).join('') || '<tr><td colspan="3" class="sub">暂无</td></tr>';
+  const topShares = (d.topShares || []).map(s => `<tr><td>${esc(s.name)}</td><td>${esc(s.ownerEmail)}</td><td>${fmtBytes(s.size)}</td></tr>`).join('') || '<tr><td colspan="3" class="sub">暂无</td></tr>';
+  $('#superStats').innerHTML = `
+    <div class="card">
+      <h2>存储总览</h2>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${fmtBytes(d.totalBytes)}</div><div class="lbl">已用总空间</div></div>
+        <div class="stat"><div class="num">${d.totalFiles}</div><div class="lbl">文件总数</div></div>
+        <div class="stat"><div class="num">${byStatus.active || 0}</div><div class="lbl">生效中分享</div></div>
+        <div class="stat"><div class="num">${byStatus.destroyed || 0}</div><div class="lbl">已销毁分享</div></div>
+      </div>
+      ${d.orphanCount ? `<div class="warn">检测到 ${d.orphanCount} 个孤儿文件（已销毁/未分享），可释放 <b>${fmtBytes(d.orphanBytes)}</b>。
+        <button class="btn sm" id="cleanupBtn" style="margin-left:8px">一键清理</button></div>` : '<p class="sub">暂无可回收的孤儿文件。</p>'}
+    </div>
+    <div class="card">
+      <h2>占用 Top 用户</h2>
+      <table><tr><th>邮箱</th><th>占用</th><th>分享数</th></tr>${topUsers}</table>
+    </div>
+    <div class="card">
+      <h2>占用 Top 分享</h2>
+      <table><tr><th>文件名</th><th>分享人</th><th>大小</th></tr>${topShares}</table>
+    </div>`;
+  const cb = $('#cleanupBtn');
+  if (cb) cb.onclick = async () => {
+    if (!confirm('确定清理孤儿文件？此操作不可恢复。')) return;
+    const rr = await fetch('/api/super/cleanup?userToken=' + encodeURIComponent(orgToken), { method: 'POST' });
+    const dd = await rr.json();
+    toast(dd.ok ? `已清理 ${dd.deleted} 个文件，释放 ${fmtBytes(dd.freed)}` : '清理失败');
+    loadStats();
+  };
+}
+async function loadUsers() {
+  const r = await fetch('/api/super/users?userToken=' + encodeURIComponent(orgToken));
+  const d = await r.json();
+  if (d.error) { $('#superUsers').innerHTML = '<div class="empty">无权访问</div>'; return; }
+  const rows = (d.users || []).map(u => {
+    const tags = [u.isSuper ? '<span class="tag on">超级管理员</span>' : '', u.role === 'admin' ? '<span class="tag on">店长</span>' : '', u.disabled ? '<span class="tag off">已禁用</span>' : ''].join(' ');
+    const acts = [
+      u.disabled ? `<button class="btn ghost sm" onclick="userAct('${u.id}','enable')">启用</button>` : `<button class="btn ghost sm" onclick="userAct('${u.id}','disable')">禁用</button>`,
+      `<button class="btn ghost sm" onclick="userAct('${u.id}','role',${u.role === 'admin' ? '\'member\'' : '\'admin\''})">${u.role === 'admin' ? '降为员工' : '设为店长'}</button>`,
+      `<button class="btn ghost sm" onclick="userAct('${u.id}','super',${u.isSuper ? 'false' : 'true'})">${u.isSuper ? '取消超管' : '设为超管'}</button>`,
+      `<button class="btn danger sm" onclick="userAct('${u.id}','delete')">删除</button>`
+    ].join(' ');
+    return `<tr><td>${esc(u.email)} ${tags}</td><td>${fmtBytes(u.bytes)}</td><td>${u.shareCount}</td><td>${new Date(u.createdAt).toLocaleString()}</td><td>${acts}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="sub">暂无用户</td></tr>';
+  $('#superUsers').innerHTML = `<div class="card"><h2>注册用户（${d.users.length}）</h2>
+    <table><tr><th>邮箱</th><th>占用</th><th>分享数</th><th>注册时间</th><th>操作</th></tr>${rows}</table>
+    <p class="sub" style="margin-top:8px">禁用后该账号无法登录；删除会同时清除其所有分享与文件。</p></div>`;
+}
+window.userAct = async (id, action, val) => {
+  let body = null, confirmMsg = null;
+  if (action === 'delete') confirmMsg = '确定删除该用户及其所有分享/文件？不可恢复！';
+  else if (action === 'disable') confirmMsg = '确定禁用该账号？';
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  if (action === 'role') body = JSON.stringify({ role: val });
+  if (action === 'super') body = JSON.stringify({ super: val });
+  const r = await fetch(`/api/super/user/${id}/${action}?userToken=` + encodeURIComponent(orgToken), {
+    method: 'POST', headers: body ? { 'Content-Type': 'application/json' } : {}, body
+  });
+  const d = await r.json();
+  toast(d.ok ? '操作成功' : (d.message || '操作失败'));
+  loadUsers();
+};
+async function loadAudit() {
+  const r = await fetch('/api/super/audit?userToken=' + encodeURIComponent(orgToken));
+  const d = await r.json();
+  if (d.error) { $('#superAudit').innerHTML = '<div class="empty">无权访问</div>'; return; }
+  const rows = (d.logs || []).map(l => `<tr><td>${new Date(l.createdAt).toLocaleString()}</td><td>${esc(l.action)}</td><td>${esc(l.target)}</td><td class="sub">${esc(l.detail)}</td></tr>`).join('') || '<tr><td colspan="4" class="sub">暂无记录</td></tr>';
+  $('#superAudit').innerHTML = `<div class="card"><h2>操作日志</h2>
+    <table><tr><th>时间</th><th>动作</th><th>对象</th><th>详情</th></tr>${rows}</table></div>`;
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }
 
 initOrg();

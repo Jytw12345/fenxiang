@@ -126,6 +126,14 @@ async function requireAdmin(token) {
   if (!u || u.role !== 'admin') return null;
   return u;
 }
+// 校验并返回超级管理员（is_super=1）
+async function requireSuper(token) {
+  const idn = await resolveIdentity(token);
+  if (!idn || idn.type !== 'user') return null;
+  const u = await db.getUser(idn.userId);
+  if (!u || !u.is_super) return null;
+  return u;
+}
 async function ownerShare(token, shareId) {
   const o = await resolveOwner(token);
   const s = await db.getShare(shareId);
@@ -148,6 +156,14 @@ async function manageShare(token, shareId) {
     return null;
   }
   return s.owner_token === o.ownerToken ? s : null;
+}
+// 店长/超管均可管理：店长按组织范围，超级管理员可管理任意分享（含无归属分享）
+async function resolveShareForAdmin(token, shareId) {
+  const s = await manageShare(token, shareId);
+  if (s) return s;
+  const sup = await requireSuper(token);
+  if (sup) return await db.getShare(shareId);
+  return null;
 }
 // 解析新用户应归属的组织与角色
 async function resolveOrg(email, inviteCode) {
@@ -270,14 +286,24 @@ const server = http.createServer(async (req, res) => {
       const pwErr = validatePassword(pw);
       if (pwErr) return sendJson(res, 400, { error: 'weak_password', message: pwErr });
       if (await db.findUserByEmail(email)) return sendJson(res, 409, { error: 'email_exists', message: '该邮箱已注册' });
-      const orgRes = await resolveOrg(email, inviteCode);
-      if (orgRes.error) return sendJson(res, 400, orgRes);
+      // 超级管理员：首个注册用户，或 SUPER_ADMIN_EMAILS 名单内邮箱（不受注册域名限制）
+      const isSuper = (await db.countUsers()) === 0 || config.SUPER_ADMIN_EMAILS.includes(email);
+      let orgRes;
+      if (isSuper) {
+        const domain = (String(email).split('@')[1] || '').toLowerCase();
+        let org = await db.getOrgByDomain(domain || 'admin');
+        if (!org) { const oid = uuid(); await db.createOrg({ id: oid, name: domain || '管理员', domain: domain || 'admin', createdAt: nowMs() }); org = { id: oid }; }
+        orgRes = { orgId: org.id, role: 'admin' };
+      } else {
+        orgRes = await resolveOrg(email, inviteCode);
+        if (orgRes.error) return sendJson(res, 400, orgRes);
+      }
       const { salt, hash } = hashPassword(pw);
       const uid = uuid();
-      await db.createUser({ id: uid, email, salt, hash, openid: null, createdAt: nowMs(), orgId: orgRes.orgId, role: orgRes.role });
+      await db.createUser({ id: uid, email, salt, hash, openid: null, createdAt: nowMs(), orgId: orgRes.orgId, role: orgRes.role, isSuper });
       const token = uuid();
       await db.createUserToken({ token, userId: uid, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
-      return sendJson(res, 200, { userToken: token, email, role: orgRes.role });
+      return sendJson(res, 200, { userToken: token, email, role: orgRes.role, isSuper });
     }
     if (req.method === 'POST' && p === '/api/auth/login') {
       const b = JSON.parse(await readBody(req, 1 << 20));
@@ -285,6 +311,7 @@ const server = http.createServer(async (req, res) => {
       const pw = String(b.password || '');
       const user = await db.findUserByEmail(email);
       if (!user || !verifyPassword(pw, user.salt, user.password_hash)) return sendJson(res, 401, { error: 'bad_creds', message: '邮箱或密码错误' });
+      if (user.disabled) return sendJson(res, 403, { error: 'disabled', message: '该账号已被禁用，请联系管理员' });
       const token = uuid();
       await db.createUserToken({ token, userId: user.id, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
       return sendJson(res, 200, { userToken: token, email: user.email });
@@ -297,7 +324,7 @@ const server = http.createServer(async (req, res) => {
       const email = user ? user.email : '微信用户';
       let orgName = '';
       if (user && user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
-      return sendJson(res, 200, { email, role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName });
+      return sendJson(res, 200, { email, role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false });
     }
 
     // Supabase 用户首登：确保本地用户行 + 归属组织（邀请码 / 域名 / 开放多租户）
@@ -310,9 +337,10 @@ const server = http.createServer(async (req, res) => {
       const inviteCode = String(body.inviteCode || '').trim();
       const user = await db.ensureUser({ sub: payload.sub, email: payload.email || '', inviteCode });
       if (user.error) return sendJson(res, 400, user);
+      if (user.disabled) return sendJson(res, 403, { error: 'disabled', message: '该账号已被禁用，请联系管理员' });
       let orgName = '';
       if (user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
-      return sendJson(res, 200, { email: user.email, role: user.role, orgId: user.org_id, orgName });
+      return sendJson(res, 200, { email: user.email, role: user.role, orgId: user.org_id, orgName, isSuper: !!user.is_super });
     }
 
     // ---------- 微信扫码（开放平台网站应用 snsapi_login）----------
@@ -556,7 +584,7 @@ const server = http.createServer(async (req, res) => {
     // 管理后台：单条分享的访问日志
     if (req.method === 'GET' && p.startsWith('/api/admin/') && p.endsWith('/logs')) {
       const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
-      const share = await manageShare(token, shareId);
+      const share = await resolveShareForAdmin(token, shareId);
       if (!share) return sendJson(res, 403, { error: 'no_auth' });
       const logs = await db.getShareLogs(shareId);
       return sendJson(res, 200, { logs });
@@ -565,7 +593,7 @@ const server = http.createServer(async (req, res) => {
     // 管理后台：待授权列表
     if (req.method === 'GET' && p.startsWith('/api/admin/') && p.endsWith('/approvals')) {
       const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
-      const share = await manageShare(token, shareId);
+      const share = await resolveShareForAdmin(token, shareId);
       if (!share) return sendJson(res, 403, { error: 'no_auth' });
       const aps = await db.getPendingApprovals(shareId);
       return sendJson(res, 200, { approvals: aps });
@@ -574,30 +602,36 @@ const server = http.createServer(async (req, res) => {
     // 管理后台：销毁 / 恢复
     if (req.method === 'POST' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/(destroy|restore)$/.test(p)) {
       const parts = p.split('/'); const token = parts[3]; const shareId = parts[5]; const action = parts[6];
-      const share = await manageShare(token, shareId);
+      const share = await resolveShareForAdmin(token, shareId);
       if (!share) return sendJson(res, 403, { error: 'no_auth' });
       await db.setShareStatus(shareId, action === 'destroy' ? 'destroyed' : 'active', nowMs());
+      const idn = await resolveIdentity(token);
+      await db.recordAudit(idn && idn.userId, action === 'destroy' ? 'destroy_share' : 'restore_share', shareId, `name=${share.name}`);
       return sendJson(res, 200, { ok: true, status: action === 'destroy' ? 'destroyed' : 'active' });
     }
 
     // 管理后台：修改权限
     if (req.method === 'PUT' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/settings$/.test(p)) {
       const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
-      const share = await manageShare(token, shareId);
+      const share = await resolveShareForAdmin(token, shareId);
       if (!share) return sendJson(res, 403, { error: 'no_auth' });
       const s = JSON.parse(await readBody(req, 1 << 20));
       await db.updateShareSettings(shareId, s, nowMs());
+      const idn = await resolveIdentity(token);
+      await db.recordAudit(idn && idn.userId, 'edit_share', shareId, `name=${share.name}`);
       return sendJson(res, 200, { ok: true });
     }
 
     // 管理后台：审批
     if (req.method === 'POST' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/approve$/.test(p)) {
       const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
-      const share = await manageShare(token, shareId);
+      const share = await resolveShareForAdmin(token, shareId);
       if (!share) return sendJson(res, 403, { error: 'no_auth' });
       const b = JSON.parse(await readBody(req, 1 << 20));
       const decision = b.decision === 'reject' ? 'rejected' : 'approved';
       await db.upsertApproval(shareId, b.viewerToken, decision, nowMs());
+      const idn = await resolveIdentity(token);
+      await db.recordAudit(idn && idn.userId, 'approve_share', shareId, `viewer=${b.viewerToken ? b.viewerToken.slice(0,8) : ''};decision=${decision}`);
       return sendJson(res, 200, { ok: true, decision });
     }
 
@@ -632,7 +666,91 @@ const server = http.createServer(async (req, res) => {
       if (!admin) return sendJson(res, 403, { error: 'no_admin' });
       const code = crypto.randomBytes(4).toString('hex');
       await db.createInvite({ code, orgId: admin.org_id, createdBy: admin.id, createdAt: nowMs() });
+      await db.recordAudit(admin.id, 'create_invite', 'org', `code=${code}`);
       return sendJson(res, 200, { code });
+    }
+
+    // ---------- 超级管理员（全局） ----------
+    // 存储占用统计
+    if (req.method === 'GET' && p === '/api/super/stats') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const st = await db.statsStorage();
+      return sendJson(res, 200, {
+        totalBytes: st.totalBytes, totalFiles: st.totalFiles, byStatus: st.byStatus,
+        orphanCount: st.orphanCount, orphanBytes: st.orphanBytes,
+        topUsers: st.topUsers.map(x => ({ email: x.email, bytes: Number(x.bytes) || 0, shareCount: Number(x.share_count) || 0 })),
+        topShares: st.topShares.map(x => ({ id: x.id, name: x.name, ownerEmail: x.owner_email || '(匿名)', size: Number(x.file_size) || 0 }))
+      });
+    }
+    // 用户列表
+    if (req.method === 'GET' && p === '/api/super/users') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const users = await db.listAllUsers();
+      return sendJson(res, 200, { users: users.map(x => ({
+        id: x.id, email: x.email, role: x.role, isSuper: !!Number(x.is_super), disabled: !!Number(x.disabled),
+        orgId: x.org_id, createdAt: Number(x.created_at), shareCount: Number(x.share_count) || 0, bytes: Number(x.bytes) || 0
+      })) });
+    }
+    // 操作审计日志
+    if (req.method === 'GET' && p === '/api/super/audit') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const logs = await db.listAudit(200);
+      return sendJson(res, 200, { logs: logs.map(l => ({ actorId: l.actor_id, action: l.action, target: l.target, detail: l.detail, createdAt: Number(l.created_at) })) });
+    }
+    // 清理孤儿文件（已销毁/未分享文件），释放存储
+    if (req.method === 'POST' && p === '/api/super/cleanup') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const orphans = await db.orphanFiles();
+      let deleted = 0, freed = 0;
+      for (const f of orphans) {
+        await db.run('DELETE FROM shares WHERE file_id=?', [f.id]);
+        try { await storage.delete(f.stored_name); } catch (e) { /* 已不存在 */ }
+        if (f.preview_path) { try { await storage.delete(f.preview_path); } catch (e) {} }
+        await db.deleteFileRow(f.id);
+        deleted++; freed += Number(f.size) || 0;
+      }
+      await db.recordAudit(sup.id, 'cleanup', 'storage', `files=${deleted};bytes=${freed}`);
+      return sendJson(res, 200, { ok: true, deleted, freed });
+    }
+    // 用户管理动作：disable / enable / role / super / delete
+    const um = p.match(/^\/api\/super\/user\/([^/]+)\/(disable|enable|role|super|delete)$/);
+    if (um && req.method === 'POST') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const targetId = um[1]; const action = um[2];
+      if (targetId === sup.id) return sendJson(res, 400, { error: 'self_op', message: '不能对自己执行该操作' });
+      const target = await db.getUser(targetId);
+      if (!target) return sendJson(res, 404, { error: 'no_user' });
+      if (action === 'disable') { await db.setUserDisabled(targetId, 1); await db.recordAudit(sup.id, 'disable_user', targetId, `email=${target.email}`); }
+      else if (action === 'enable') { await db.setUserDisabled(targetId, 0); await db.recordAudit(sup.id, 'enable_user', targetId, `email=${target.email}`); }
+      else if (action === 'role') {
+        const b = JSON.parse(await readBody(req, 1 << 20));
+        const role = b.role === 'admin' ? 'admin' : 'member';
+        await db.setUserRole(targetId, role); await db.recordAudit(sup.id, 'set_role', targetId, `email=${target.email};role=${role}`);
+      }
+      else if (action === 'super') {
+        const b = JSON.parse(await readBody(req, 1 << 20));
+        await db.setUserSuper(targetId, b.super ? 1 : 0); await db.recordAudit(sup.id, 'set_super', targetId, `email=${target.email};super=${!!b.super}`);
+      }
+      else if (action === 'delete') {
+        const shares = await db.listMySharesById(targetId);
+        for (const sh of shares) {
+          const f = await db.getFile(sh.file_id);
+          if (f) {
+            try { await storage.delete(f.stored_name); } catch (e) {}
+            if (f.preview_path) { try { await storage.delete(f.preview_path); } catch (e) {} }
+            await db.deleteFileRow(f.id);
+          }
+          await db.deleteShareRow(sh.id);
+        }
+        await db.deleteUser(targetId);
+        await db.recordAudit(sup.id, 'delete_user', targetId, `email=${target.email};shares=${shares.length}`);
+      }
+      return sendJson(res, 200, { ok: true });
     }
 
     return sendJson(res, 404, { error: 'route_not_found' });
