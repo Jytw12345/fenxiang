@@ -196,11 +196,13 @@ async function resolveOrg(email, inviteCode) {
 }
 
 // ---------- 授权会话发放 ----------
-async function grantAccess(share, viewerToken) {
+async function grantAccess(req, share, viewerToken) {
   const token = uuid();
   const ttl = (share.duration_sec > 0 ? share.duration_sec : 24 * 3600) * 1000;
   await db.createSession({ token, shareId: share.id, viewerToken, expiresAt: nowMs() + ttl });
-  await db.logOpen({ shareId: share.id, viewerToken, now: nowMs() });
+  const ip = req ? clientIp(req) : '';
+  const ua = req ? (req.headers['user-agent'] || '') : '';
+  await db.logOpen({ shareId: share.id, viewerToken, ip, ua, now: nowMs() });
   return {
     ok: true, accessToken: token, expiresIn: ttl, viewerToken,
     kind: share.kind, name: share.name, watermark: share.watermark,
@@ -512,7 +514,7 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { needApproval: true, message: '已发送访问申请，等待分享者授权' });
         }
       }
-      return sendJson(res, 200, await grantAccess(share, viewerToken));
+      return sendJson(res, 200, await grantAccess(req, share, viewerToken));
     }
 
     // 内容下发（需有效会话）
@@ -521,6 +523,8 @@ const server = http.createServer(async (req, res) => {
       const at = u.searchParams.get('at');
       const sess = await db.getSession(at);
       if (!sess || Number(sess.expires_at) < nowMs()) return sendJson(res, 403, { error: 'invalid_session' });
+      // 越权防护：会话必须归属于当前分享
+      if (sess.share_id !== shareId) return sendJson(res, 403, { error: 'forbidden', message: '会话与分享不匹配' });
       const share = await db.getShare(shareId);
       if (!share || share.status !== 'active') return sendJson(res, 403, { error: 'destroyed' });
       const file = await db.getFile(share.file_id);
@@ -542,6 +546,7 @@ const server = http.createServer(async (req, res) => {
       const at = u.searchParams.get('at');
       const sess = await db.getSession(at);
       if (!sess || Number(sess.expires_at) < nowMs()) return sendJson(res, 403, { error: 'invalid_session' });
+      if (sess.share_id !== shareId) return sendJson(res, 403, { error: 'forbidden', message: '会话与分享不匹配' });
       const share = await db.getShare(shareId);
       if (!share || share.status !== 'active') return sendJson(res, 403, { error: 'destroyed' });
       const file = await db.getFile(share.file_id);
@@ -633,6 +638,15 @@ const server = http.createServer(async (req, res) => {
       const idn = await resolveIdentity(token);
       await db.recordAudit(idn && idn.userId, 'approve_share', shareId, `viewer=${b.viewerToken ? b.viewerToken.slice(0,8) : ''};decision=${decision}`);
       return sendJson(res, 200, { ok: true, decision });
+    }
+
+    // 管理后台：查看者明细（IP/时间/设备/位置）
+    if (req.method === 'GET' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/viewers$/.test(p)) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
+      const share = await resolveShareForAdmin(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      const viewers = await db.getShareViewers(shareId);
+      return sendJson(res, 200, { viewers });
     }
 
     // ---------- 组织后台（店长） ----------

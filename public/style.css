@@ -95,6 +95,11 @@ input:focus,select:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0
 .tag{display:inline-block;font-size:12px;padding:2px 9px;border-radius:999px;background:#eef1f7;color:var(--muted);margin:2px;}
 .tag.on{background:#e8f7ee;color:var(--ok);}
 .tag.off{background:#fdecec;color:var(--danger);}
+/* 查看者明细表 */
+table.vt{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+table.vt th,table.vt td{padding:7px 8px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top;}
+table.vt th{background:#f6f8fc;color:var(--muted);font-weight:600;white-space:nowrap;}
+table.vt tr:hover td{background:#fafbff;}
 .empty{text-align:center;color:var(--muted);padding:50px 0;}
 .share-item{border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px;background:var(--panel);}
 .share-item .hd{display:flex;justify-content:space-between;align-items:center;}

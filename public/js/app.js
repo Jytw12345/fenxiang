@@ -66,8 +66,8 @@ async function uploadAndShare() {
     const up = await fetch('/api/upload?name=' + encodeURIComponent(selectedFile.name) + '&mime=' + encodeURIComponent(selectedFile.type || 'application/octet-stream'), {
       method: 'POST', body: buf
     });
-    const upRes = await up.json();
-    if (!up.ok) throw new Error(upRes.error || '上传失败');
+    const upRes = await up.json().catch(() => ({}));
+    if (!up.ok) throw new Error((upRes && upRes.message) || upRes.error || ('上传失败（HTTP ' + up.status + '）'));
 
     // 2) 创建分享
     const expVal = parseInt($('#expire').value, 10);
@@ -87,8 +87,8 @@ async function uploadAndShare() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileId: upRes.fileId, settings, userToken: userToken || null })
     });
-    const shRes = await sh.json();
-    if (!sh.ok) throw new Error(shRes.error || '创建失败');
+    const shRes = await sh.json().catch(() => ({}));
+    if (!sh.ok) throw new Error((shRes && shRes.message) || shRes.error || ('创建分享失败（HTTP ' + sh.status + '）'));
 
     // 3) 展示结果
     $('#qrImg').src = shRes.qr;

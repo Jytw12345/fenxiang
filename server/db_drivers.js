@@ -158,6 +158,11 @@ async function createDriver() {
   try { await drv.exec('ALTER TABLE users ADD COLUMN is_super INTEGER DEFAULT 0'); } catch (e) { /* 列已存在，忽略 */ }
   try { await drv.exec('ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0'); } catch (e) { /* 列已存在，忽略 */ }
 
+  // 兼容旧库：为 logs 补齐查看者明细列（设备/系统/浏览器/地理位置）
+  for (const col of ['device', 'os', 'browser', 'country', 'region', 'city']) {
+    try { await drv.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT DEFAULT ''`); } catch (e) { /* 列已存在，忽略 */ }
+  }
+
   const a = approvalSql(type);
   drv.upsertApproval = (shareId, viewerToken, status, requestedAt, resolvedAt) =>
     drv.run(a.upsert, [shareId, viewerToken, status, requestedAt, resolvedAt]);

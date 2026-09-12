@@ -25,13 +25,24 @@ const cosKey = (storedName) => 'uploads/' + storedName;
 // 保存：storedName 为逻辑文件名，buffer 为内容，mime 为类型
 async function save(storedName, buffer, mime) {
   if (cos) {
-    await new Promise((resolve, reject) => {
-      cos.putObject({
-        Bucket: config.COS.Bucket, Region: config.COS.Region,
-        Key: cosKey(storedName), Body: buffer, ContentType: mime || 'application/octet-stream'
-      }, (err, data) => err ? reject(err) : resolve(data));
-    });
-    return;
+    try {
+      await new Promise((resolve, reject) => {
+        cos.putObject({
+          Bucket: config.COS.Bucket, Region: config.COS.Region,
+          Key: cosKey(storedName), Body: buffer, ContentType: mime || 'application/octet-stream'
+        }, (err, data) => err ? reject(err) : resolve(data));
+      });
+      return;
+    } catch (e) {
+      // 把 COS 关键错误码/状态码打到服务端日志，便于在 Render 后台直接看到根因
+      console.error('[storage] COS 上传失败：', {
+        bucket: config.COS.Bucket, region: config.COS.Region, key: cosKey(storedName),
+        code: e.code, statusCode: e.statusCode, message: e.message
+      });
+      throw new Error('COS 上传失败（' + (e.code || e.statusCode || e.message || '未知错误') +
+        '）：请检查 COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION 是否正确，' +
+        '且该密钥对桶 ' + config.COS.Bucket + ' 拥有写入权限');
+    }
   }
   fs.writeFileSync(path.join(UPLOAD_DIR, storedName), buffer);
 }

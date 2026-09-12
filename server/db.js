@@ -4,6 +4,7 @@
 const crypto = require('crypto');
 const config = require('./config');
 const { createDriver } = require('./db_drivers');
+const track = require('./track');
 
 function uuid() { return crypto.randomBytes(16).toString('hex'); }
 
@@ -222,9 +223,23 @@ async function createSession({ token, shareId, viewerToken, expiresAt }) {
 async function getSession(token) {
   return drv.get('SELECT * FROM sessions WHERE token=?', [token]) || null;
 }
-async function logOpen({ shareId, viewerToken, now }) {
-  await drv.run('INSERT INTO logs (id,share_id,viewer_token,ip,ua,event,progress,created_at) VALUES (?,?,?,?,?,?,?,?)',
-    [uuid(), shareId, viewerToken, '', '', 'open', '', now]);
+async function logOpen({ shareId, viewerToken, ip, ua, now }) {
+  const { device, os, browser } = track.parseUa(ua);
+  const id = uuid();
+  await drv.run('INSERT INTO logs (id,share_id,viewer_token,ip,ua,event,progress,created_at,device,os,browser) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+    [id, shareId, viewerToken, ip || '', ua || '', 'open', '', now, device, os, browser]);
+  // 异步补全地理信息（不阻塞主流程，失败降级）
+  Promise.resolve().then(async () => {
+    try {
+      const geo = await track.geoIp(ip);
+      if (geo.country || geo.region || geo.city) await updateLogGeo(id, geo);
+    } catch (e) { /* 忽略 */ }
+  });
+  return id;
+}
+async function updateLogGeo(id, geo) {
+  await drv.run('UPDATE logs SET country=?, region=?, city=? WHERE id=?',
+    [geo.country || '', geo.region || '', geo.city || '', id]);
 }
 async function recordProgress({ shareId, viewerToken, ip, ua, event, progress, now }) {
   await drv.run('INSERT INTO logs (id,share_id,viewer_token,ip,ua,event,progress,created_at) VALUES (?,?,?,?,?,?,?,?)',
@@ -232,6 +247,26 @@ async function recordProgress({ shareId, viewerToken, ip, ua, event, progress, n
 }
 async function getShareLogs(shareId) {
   return drv.all('SELECT viewer_token,ip,event,progress,created_at FROM logs WHERE share_id=? ORDER BY created_at DESC LIMIT 300', [shareId]);
+}
+// 按查看者聚合明细：首访/末访时间、打开次数、设备/系统/浏览器、地理位置、最后进度
+async function getShareViewers(shareId) {
+  const rows = await drv.all(`SELECT viewer_token,
+      MIN(created_at) AS first_at, MAX(created_at) AS last_at,
+      COUNT(*) AS events,
+      SUM(CASE WHEN event='open' THEN 1 ELSE 0 END) AS opens,
+      MAX(progress) AS last_progress,
+      MAX(device) AS device, MAX(os) AS os, MAX(browser) AS browser,
+      MAX(country) AS country, MAX(region) AS region, MAX(city) AS city, MAX(ip) AS ip
+    FROM logs WHERE share_id=? GROUP BY viewer_token ORDER BY last_at DESC`, [shareId]);
+  return rows.map(r => ({
+    viewerToken: r.viewer_token,
+    firstAt: Number(r.first_at), lastAt: Number(r.last_at),
+    events: Number(r.events), opens: Number(r.opens),
+    lastProgress: r.last_progress || '',
+    device: r.device || '未知', os: r.os || '未知', browser: r.browser || '未知',
+    country: r.country || '', region: r.region || '', city: r.city || '',
+    ip: r.ip || ''
+  }));
 }
 async function getPendingApprovals(shareId) {
   return drv.all("SELECT viewer_token,status,requested_at FROM approvals WHERE share_id=? AND status='pending'", [shareId]);
@@ -322,7 +357,7 @@ module.exports = {
   // access control / approvals
   countOpens, distinctViewers, getApproval, touchApproval, upsertApproval,
   // sessions / logs
-  createSession, getSession, logOpen, recordProgress, getShareLogs, getPendingApprovals,
+  createSession, getSession, logOpen, recordProgress, getShareLogs, getShareViewers, getPendingApprovals,
   // admin
   listMySharesById, listMySharesByOwnerToken,
   // super admin

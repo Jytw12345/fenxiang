@@ -87,10 +87,29 @@ async function load() {
 }
 window.copyLink = (l) => { navigator.clipboard.writeText(l); toast('已复制'); };
 window.showLogs = async (id) => {
-  const r = await fetch(`/api/admin/${token}/share/${id}/logs`); const d = await r.json();
-  $('#logsBody').innerHTML = d.logs.length
-    ? `<table><tr><th>时间</th><th>访客</th><th>IP</th><th>事件</th><th>进度</th></tr>${d.logs.map(l => `<tr><td>${new Date(l.created_at).toLocaleString()}</td><td>${esc(l.viewer_token.slice(0,8))}</td><td>${esc(l.ip)}</td><td>${esc(l.event)}</td><td>${esc(l.progress)}</td></tr>`).join('')}</table>`
-    : '<p class="sub">暂无访问记录</p>';
+  const r = await fetch(`/api/admin/${token}/share/${id}/viewers`); const d = await r.json();
+  const v = d.viewers || [];
+  if (!v.length) { $('#logsBody').innerHTML = '<p class="sub">暂无访问记录</p>'; $('#logsModal').classList.add('show'); return; }
+  $('#logsBody').innerHTML = `<table class="vt">
+    <tr><th>查看者</th><th>IP</th><th>位置</th><th>设备/系统</th><th>浏览器</th><th>首次访问</th><th>最近访问</th><th>次数</th></tr>
+    ${v.map(x => {
+      const loc = [x.country, x.region, x.city].filter(Boolean).join('·') || '—';
+      const dev = [x.device, x.os].filter(Boolean).join('/');
+      const first = new Date(x.firstAt).toLocaleString();
+      const last = new Date(x.lastAt).toLocaleString();
+      return `<tr>
+        <td>${esc(x.viewerToken.slice(0,8))}<br><span class="sub">进度 ${esc(x.lastProgress || '—')}</span></td>
+        <td>${esc(x.ip || '—')}</td>
+        <td>${esc(loc)}</td>
+        <td>${esc(dev)}</td>
+        <td>${esc(x.browser)}</td>
+        <td>${first}</td>
+        <td>${last}</td>
+        <td>${x.opens} 次</td>
+      </tr>`;
+    }).join('')}
+  </table>
+  <p class="sub" style="margin-top:10px">注：IP 与地理位置由访客网络决定，可能受代理 / 移动网络影响；内网访问标记为「内网/局域网」。</p>`;
   $('#logsModal').classList.add('show');
 };
 window.destroy = async (id) => { await fetch(`/api/admin/${token}/share/${id}/destroy`, { method: 'POST' }); toast('已远程销毁'); load(); };
