@@ -1,0 +1,654 @@
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const https = require('https');
+const db = require('./db');
+const config = require('./config');
+const storage = require('./storage');
+const preview = require('./preview');
+const { verifySupabaseToken } = require('./supabase_auth');
+
+const UPLOAD_DIR = db.UPLOAD_DIR;
+const PORT = config.PORT;
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const MAX_UPLOAD = 200 * 1024 * 1024; // 200MB
+
+// ---------- 工具 ----------
+function uuid() { return crypto.randomBytes(16).toString('hex'); }
+function nowMs() { return Date.now(); }
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.socket.remoteAddress || '';
+}
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+function sendHtml(res, code, html) {
+  res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+// 跨域头：前端（GitHub Pages 等异源）调用 API 必需。无 cookie，故不开启 credentials。
+function corsHeaders(req) {
+  const origin = (req && req.headers && req.headers.origin) || '*';
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Allow-Credentials': 'false',
+    'Vary': 'Origin'
+  };
+}
+function readBody(req, limit = MAX_UPLOAD) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('TOO_LARGE')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+function httpsGetJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (r) => {
+      let d = ''; r.on('data', (c) => d += c); r.on('end', () => {
+        try { resolve(JSON.parse(d)); } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon'
+};
+function serveStatic(req, res, urlPath) {
+  let rel = urlPath === '/' ? '/index.html' : urlPath;
+  const filePath = path.join(PUBLIC_DIR, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
+  if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('forbidden'); return; }
+  fs.readFile(filePath, (err, data) => {
+    if (err) { res.writeHead(404); res.end('not found'); return; }
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.end(data);
+  });
+}
+
+// ---------- 密码哈希（scrypt，零依赖）----------
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return { salt, hash };
+}
+function verifyPassword(pw, salt, hash) {
+  const h = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(hash, 'hex'));
+}
+function validatePassword(pw) {
+  if (typeof pw !== 'string' || pw.length < 8) return '密码至少 8 位';
+  if (!/[a-zA-Z]/.test(pw) || !/[0-9]/.test(pw)) return '密码需同时包含字母和数字';
+  const weak = ['12345678', 'password', 'qwerty123', '11111111', 'abcdefgh', '1234567890', 'qwertyui'];
+  if (weak.includes(pw.toLowerCase())) return '密码过于常见，请更换';
+  return null;
+}
+
+// ---------- 鉴权辅助 ----------
+// 双模式身份解析：启用 Supabase 时校验其 JWT 并映射到本地用户；否则沿用自研 user_tokens。
+async function resolveIdentity(token) {
+  if (!token) return null;
+  if (config.SUPABASE.enabled) {
+    const payload = verifySupabaseToken(token);
+    if (!payload) return null;
+    const u = await db.getUserBySupabaseId(payload.sub);
+    return u ? { type: 'user', userId: u.id } : null;
+  }
+  const ut = await db.getUserToken(token);
+  if (ut) return { type: 'user', userId: ut.userId };
+  return null;
+}
+async function resolveOwner(token) {
+  const idn = await resolveIdentity(token);
+  if (idn) return idn;
+  return { type: 'owner', ownerToken: token };
+}
+// 校验并返回店长用户对象（仅 role=admin 通过）
+async function requireAdmin(token) {
+  const idn = await resolveIdentity(token);
+  if (!idn || idn.type !== 'user') return null;
+  const u = await db.getUser(idn.userId);
+  if (!u || u.role !== 'admin') return null;
+  return u;
+}
+async function ownerShare(token, shareId) {
+  const o = await resolveOwner(token);
+  const s = await db.getShare(shareId);
+  if (!s) return null;
+  if (o.type === 'user') return s.owner_id === o.userId ? s : null;
+  return s.owner_token === o.ownerToken ? s : null;
+}
+// 店长可管理本组织内任意分享（员工仅能管理自己的）
+async function manageShare(token, shareId) {
+  const o = await resolveOwner(token);
+  const s = await db.getShare(shareId);
+  if (!s) return null;
+  if (o.type === 'user') {
+    if (s.owner_id === o.userId) return s;
+    const me = await db.getUser(o.userId);
+    if (me && me.role === 'admin' && me.org_id && s.owner_id) {
+      const owner = await db.getUser(s.owner_id);
+      if (owner && owner.org_id === me.org_id) return s;
+    }
+    return null;
+  }
+  return s.owner_token === o.ownerToken ? s : null;
+}
+// 解析新用户应归属的组织与角色
+async function resolveOrg(email, inviteCode) {
+  const domain = (String(email).split('@')[1] || '').toLowerCase();
+  if (inviteCode) {
+    const inv = await db.getInvite(inviteCode);
+    if (!inv) return { error: 'invalid_invite', message: '邀请码无效' };
+    return { orgId: inv.org_id, role: 'member' };
+  }
+  if (domain) {
+    const org = await db.getOrgByDomain(domain);
+    if (org) return { orgId: org.id, role: 'member' }; // 同域名自动加入已有组织
+  }
+  if (config.REGISTER_DOMAIN) {
+    if (domain === config.REGISTER_DOMAIN) {
+      let org = await db.getOrgByDomain(domain);
+      if (!org) {
+        const orgId = uuid();
+        await db.createOrg({ id: orgId, name: config.REGISTER_DOMAIN, domain, createdAt: nowMs() });
+        org = { id: orgId };
+      }
+      return { orgId: org.id, role: 'admin' }; // 该域名首个注册者任店长
+    }
+    return { error: 'domain_blocked', message: `仅限 ${config.REGISTER_DOMAIN} 邮箱注册` };
+  }
+  // 开放多租户：新域名首个注册者自行创建组织并任店长
+  const orgId = uuid();
+  await db.createOrg({ id: orgId, name: domain || '我的组织', domain, createdAt: nowMs() });
+  return { orgId, role: 'admin' };
+}
+
+// ---------- 授权会话发放 ----------
+async function grantAccess(share, viewerToken) {
+  const token = uuid();
+  const ttl = (share.duration_sec > 0 ? share.duration_sec : 24 * 3600) * 1000;
+  await db.createSession({ token, shareId: share.id, viewerToken, expiresAt: nowMs() + ttl });
+  await db.logOpen({ shareId: share.id, viewerToken, now: nowMs() });
+  return {
+    ok: true, accessToken: token, expiresIn: ttl, viewerToken,
+    kind: share.kind, name: share.name, watermark: share.watermark,
+    restrictions: { copy: !!share.disable_copy, print: !!share.disable_print, download: !!share.disable_download, screenshot: !!share.disable_screenshot }
+  };
+}
+
+// ---------- docx 转换缓存 ----------
+const docxCache = new Map();
+async function renderDocx(file) {
+  if (docxCache.has(file.id)) return docxCache.get(file.id);
+  const mammoth = require('mammoth');
+  const buf = await storage.readBuffer(file.stored_name);
+  const result = await mammoth.convertToHtml(
+    { buffer: buf },
+    { convertImage: mammoth.images.imgElement(async (el) => {
+        const b = await el.readAsBuffer();
+        const ct = el.contentType || 'image/png';
+        return { src: `data:${ct};base64,${b.toString('base64')}` };
+      }) }
+  );
+  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:system-ui,'Microsoft YaHei',sans-serif;line-height:1.7;padding:24px;max-width:820px;margin:0 auto;color:#222">${result.value}</body></html>`;
+  docxCache.set(file.id, html);
+  return html;
+}
+
+// ---------- 微信 OAuth 共用 ----------
+function wechatQrconnectUrl(state, origin) {
+  const redirect = encodeURIComponent((config.BASE_URL || origin) + '/api/wechat/callback');
+  return `https://open.weixin.qq.com/connect/qrconnect?appid=${config.WECHAT.APPID}` +
+    `&redirect_uri=${redirect}&response_type=code&scope=snsapi_login&state=${state}#wechat_redirect`;
+}
+async function finalizeWechat(state, openid, nickname) {
+  let userId = state.user_id;
+  if (!userId) {
+    const exist = await db.findUserByOpenid(openid);
+    if (exist) userId = exist.id;
+    else {
+      userId = uuid();
+      await db.createUser({
+        id: userId,
+        email: (openid || 'wx_' + uuid().slice(0, 10)) + '@wechat.local',
+        salt: '', hash: '', openid, createdAt: nowMs()
+      });
+    }
+  }
+  await db.confirmWechatState({ userId, openid, status: 'confirmed', state: state.state });
+
+  if (state.purpose === 'login') {
+    const token = uuid();
+    await db.createUserToken({ token, userId, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
+    await db.setWechatLoginToken({ token, state: state.state });
+    return { kind: 'login', token, email: nickname || '微信用户' };
+  }
+  // verify：批准该访客并直接发放访问会话
+  const share = await db.getShare(state.share_id);
+  if (!share) return { kind: 'verify', error: 'share_gone' };
+  await db.upsertApproval(share.id, state.viewer_token, 'approved', nowMs());
+  const g = await grantAccess(share, state.viewer_token);
+  await db.setWechatVerifyIssued({ accessToken: g.accessToken, expiresIn: g.expiresIn, state: state.state });
+  return { kind: 'verify', token: g.accessToken, expiresIn: g.expiresIn };
+}
+
+// ---------- 路由 ----------
+const server = http.createServer(async (req, res) => {
+  const u = new URL(req.url, `http://${req.headers.host}`);
+  const p = u.pathname;
+  try {
+    // 统一注入跨域头；OPTIONS 预检直接放行
+    const _cors = corsHeaders(req);
+    for (const k in _cors) res.setHeader(k, _cors[k]);
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+    if (req.method === 'GET' && !p.startsWith('/api/')) { return serveStatic(req, res, p); }
+
+    // ---------- 用户认证 ----------
+    if (req.method === 'POST' && p === '/api/auth/register') {
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const email = String(b.email || '').trim().toLowerCase();
+      const pw = String(b.password || '');
+      const inviteCode = String(b.inviteCode || '').trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return sendJson(res, 400, { error: 'invalid_email' });
+      const pwErr = validatePassword(pw);
+      if (pwErr) return sendJson(res, 400, { error: 'weak_password', message: pwErr });
+      if (await db.findUserByEmail(email)) return sendJson(res, 409, { error: 'email_exists', message: '该邮箱已注册' });
+      const orgRes = await resolveOrg(email, inviteCode);
+      if (orgRes.error) return sendJson(res, 400, orgRes);
+      const { salt, hash } = hashPassword(pw);
+      const uid = uuid();
+      await db.createUser({ id: uid, email, salt, hash, openid: null, createdAt: nowMs(), orgId: orgRes.orgId, role: orgRes.role });
+      const token = uuid();
+      await db.createUserToken({ token, userId: uid, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
+      return sendJson(res, 200, { userToken: token, email, role: orgRes.role });
+    }
+    if (req.method === 'POST' && p === '/api/auth/login') {
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const email = String(b.email || '').trim().toLowerCase();
+      const pw = String(b.password || '');
+      const user = await db.findUserByEmail(email);
+      if (!user || !verifyPassword(pw, user.salt, user.password_hash)) return sendJson(res, 401, { error: 'bad_creds', message: '邮箱或密码错误' });
+      const token = uuid();
+      await db.createUserToken({ token, userId: user.id, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
+      return sendJson(res, 200, { userToken: token, email: user.email });
+    }
+    if (req.method === 'GET' && p === '/api/auth/me') {
+      const token = u.searchParams.get('userToken');
+      const idn = await resolveIdentity(token);
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_session' });
+      const user = await db.getUser(idn.userId);
+      const email = user ? user.email : '微信用户';
+      let orgName = '';
+      if (user && user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
+      return sendJson(res, 200, { email, role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName });
+    }
+
+    // Supabase 用户首登：确保本地用户行 + 归属组织（邀请码 / 域名 / 开放多租户）
+    if (req.method === 'POST' && p === '/api/auth/bootstrap') {
+      const body = JSON.parse(await readBody(req, 1 << 20));
+      const token = body.userToken || u.searchParams.get('userToken');
+      if (!config.SUPABASE.enabled) return sendJson(res, 400, { error: 'supabase_disabled', message: '未启用 Supabase 身份体系' });
+      const payload = verifySupabaseToken(token);
+      if (!payload) return sendJson(res, 401, { error: 'invalid_token' });
+      const inviteCode = String(body.inviteCode || '').trim();
+      const user = await db.ensureUser({ sub: payload.sub, email: payload.email || '', inviteCode });
+      if (user.error) return sendJson(res, 400, user);
+      let orgName = '';
+      if (user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
+      return sendJson(res, 200, { email: user.email, role: user.role, orgId: user.org_id, orgName });
+    }
+
+    // ---------- 微信扫码（开放平台网站应用 snsapi_login）----------
+    if (req.method === 'POST' && p === '/api/wechat/start') {
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const purpose = b.purpose === 'verify' ? 'verify' : 'login';
+      const state = uuid();
+      const row = { state, purpose, share_id: b.share || null, viewer_token: b.viewerToken || uuid(), status: 'pending', created_at: nowMs(), expires_at: nowMs() + 10 * 60 * 1000 };
+      await db.createWechatState({
+        state, userId: null, openid: null, status: 'pending', createdAt: nowMs(), purpose,
+        shareId: row.share_id, viewerToken: row.viewer_token, expiresAt: row.expires_at
+      });
+      if (config.WECHAT.enabled) {
+        const url = wechatQrconnectUrl(state, u.origin);
+        return sendJson(res, 200, { state, mode: 'real', qrUrl: url, viewerToken: row.viewer_token });
+      }
+      const QRCode = require('qrcode');
+      const qr = await QRCode.toDataURL(`${u.origin}/wechat-scan.html?state=${state}`);
+      return sendJson(res, 200, { state, mode: 'sim', qr, viewerToken: row.viewer_token });
+    }
+    if (req.method === 'GET' && p === '/api/wechat/callback') {
+      const code = u.searchParams.get('code');
+      const state = u.searchParams.get('state');
+      const ws = await db.getWechatState(state);
+      if (!ws || ws.status !== 'pending') return sendHtml(res, 400, '<h3>验证状态无效或已过期</h3><p>请关闭此窗口后重试。</p>');
+      let openid = null, nickname = '微信用户';
+      if (config.WECHAT.enabled && code) {
+        try {
+          const tk = await httpsGetJson(`https://api.weixin.qq.com/sns/oauth2/access_token?appid=${config.WECHAT.APPID}&secret=${config.WECHAT.SECRET}&code=${code}&grant_type=authorization_code`);
+          if (tk.errcode) return sendHtml(res, 400, '<h3>微信授权失败</h3><p>' + (tk.errmsg || '') + '</p>');
+          openid = tk.openid;
+          try {
+            const info = await httpsGetJson(`https://api.weixin.qq.com/sns/userinfo?access_token=${tk.access_token}&openid=${tk.openid}`);
+            if (info.nickname) nickname = info.nickname;
+          } catch (e) { /* 昵称非必需 */ }
+        } catch (e) {
+          return sendHtml(res, 502, '<h3>微信接口调用失败</h3><p>' + e.message + '</p>');
+        }
+      } else {
+        openid = 'wx_' + uuid().slice(0, 12); // 模拟模式下的假 openid
+      }
+      const fin = await finalizeWechat(ws, openid, nickname);
+      if (fin.error) return sendHtml(res, 400, '<h3>验证失败</h3>');
+      return sendHtml(res, 200, '<h3 style="font-family:system-ui">✅ 验证成功</h3><p>请返回原页面继续。</p><script>try{window.close();}catch(e){}</script>');
+    }
+    if (req.method === 'POST' && p === '/api/wechat/sim') {
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const ws = await db.getWechatState(b.state);
+      if (!ws || ws.status !== 'pending') return sendJson(res, 403, { error: 'bad_state' });
+      const fin = await finalizeWechat(ws, 'wx_' + uuid().slice(0, 12), '微信用户');
+      if (fin.error) return sendJson(res, 400, { error: fin.error });
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && p === '/api/wechat/check') {
+      const state = u.searchParams.get('state');
+      const ws = await db.getWechatState(state);
+      if (!ws) return sendJson(res, 404, { error: 'no_state' });
+      if (ws.status === 'confirmed') {
+        if (ws.purpose === 'login') return sendJson(res, 200, { ok: true, userToken: ws.issued_token, email: '微信用户' });
+        return sendJson(res, 200, { ok: true, verified: true, accessToken: ws.issued_token, expiresIn: Number(ws.access_token) || 0 });
+      }
+      return sendJson(res, 200, { ok: false, status: ws.status });
+    }
+
+    // 上传文件
+    if (req.method === 'POST' && p === '/api/upload') {
+      const buf = await readBody(req);
+      if (!buf.length) return sendJson(res, 400, { error: 'empty' });
+      const name = u.searchParams.get('name') ? decodeURIComponent(u.searchParams.get('name')) : 'file';
+      const mime = u.searchParams.get('mime') || 'application/octet-stream';
+      const ext = path.extname(name).toLowerCase();
+      let kind = 'download';
+      if (mime === 'application/pdf' || ext === '.pdf') kind = 'pdf';
+      else if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext) || mime.startsWith('image/')) kind = 'image';
+      else if (ext === '.docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') kind = 'docx';
+      else if (preview.SOURCE_EXTS.includes(ext)) kind = 'source'; // 设计源文件（PSD/AI/CDR 等）
+      const fileId = uuid();
+      const stored = fileId + ext;
+      await storage.save(stored, buf, mime);
+      // 源文件：尝试在上传时生成网页预览图（失败则降级为仅下载，不阻断主流程）
+      let previewPath = null;
+      if (kind === 'source') {
+        try {
+          const pv = await preview.generatePreview(ext, mime, buf);
+          if (pv.ok) {
+            const pvName = fileId + '_preview.png';
+            await storage.save(pvName, pv.buffer, 'image/png');
+            previewPath = pvName;
+          }
+        } catch (e) {
+          console.warn('[preview] 生成预览失败，降级为仅下载：', e.message);
+        }
+      }
+      await db.createFile({ id: fileId, originalName: name, storedName: stored, mime, size: buf.length, kind, previewPath, createdAt: nowMs() });
+      return sendJson(res, 200, { fileId, name, kind, hasPreview: !!previewPath, size: buf.length });
+    }
+
+    // 创建分享
+    if (req.method === 'POST' && p === '/api/share') {
+      const body = JSON.parse(await readBody(req, 1 << 20));
+      const file = await db.getFile(body.fileId);
+      if (!file) return sendJson(res, 404, { error: 'file_not_found' });
+      const shareId = uuid().slice(0, 12);
+      const ownerToken = uuid();
+      const s = body.settings || {};
+      let ownerId = null;
+      if (body.userToken) {
+        const idn = await resolveIdentity(body.userToken);
+        if (idn && idn.type === 'user') ownerId = idn.userId;
+      }
+      const am = (s.authMode === 'approve' || s.authMode === 'wechat') ? s.authMode : 'open';
+      await db.createShare({
+        shareId, fileId: file.id, ownerId, ownerToken, name: s.name || file.original_name, kind: file.kind,
+        maxViewers: Number(s.maxViewers) || 0, maxViews: Number(s.maxViews) || 0, durationSec: Number(s.durationSec) || 0,
+        expiresAt: s.expiresAt ? Number(s.expiresAt) : null, accessCode: s.accessCode || null, authMode: am,
+        watermark: s.watermark || '',
+        restrictions: { copy: !!s.disableCopy, print: !!s.disablePrint, download: !!s.disableDownload, screenshot: !!s.disableScreenshot },
+        createdAt: nowMs()
+      });
+      const link = `${(config.BASE_URL || u.origin)}/viewer.html?share=${shareId}`;
+      const QRCode = require('qrcode');
+      const qr = await QRCode.toDataURL(link);
+      return sendJson(res, 200, { shareId, ownerToken, link, qr, name: s.name || file.original_name });
+    }
+
+    // 获取分享元数据
+    if (req.method === 'GET' && p.startsWith('/api/share/')) {
+      const shareId = p.split('/')[3];
+      const share = await db.getShareMeta(shareId);
+      if (!share) return sendJson(res, 404, { error: 'not_found' });
+      const requiresCode = !!share.access_code;
+      return sendJson(res, 200, {
+        shareId: share.id, name: share.name, kind: share.kind, status: share.status,
+        preview: !!share.preview_path,
+        requiresCode, authMode: share.auth_mode, watermark: share.watermark,
+        restrictions: {
+          copy: !!share.disable_copy, print: !!share.disable_print,
+          download: !!share.disable_download, screenshot: !!share.disable_screenshot
+        }
+      });
+    }
+
+    // 访问鉴权（核心权限引擎）
+    if (req.method === 'POST' && p === '/api/access') {
+      const body = JSON.parse(await readBody(req, 1 << 20));
+      const shareId = body.shareId, viewerToken = body.viewerToken || uuid();
+      const share = await db.getShare(shareId);
+      if (!share) return sendJson(res, 404, { error: 'not_found' });
+      if (share.status !== 'active') return sendJson(res, 403, { error: 'destroyed', message: '该文档已下架或销毁' });
+      if (share.expires_at && nowMs() > Number(share.expires_at)) return sendJson(res, 403, { error: 'expired', message: '分享链接已过期' });
+
+      const totalViews = await db.countOpens(shareId);
+      const distinct = await db.distinctViewers(shareId);
+      const otherViewers = distinct.filter(v => v !== viewerToken).length;
+      if (share.max_viewers > 0 && otherViewers >= share.max_viewers)
+        return sendJson(res, 403, { error: 'limit_viewers', message: '访问人数已达上限' });
+      if (share.max_views > 0 && totalViews >= share.max_views)
+        return sendJson(res, 403, { error: 'limit_views', message: '阅读次数已达上限' });
+
+      if (share.access_code && body.code !== share.access_code)
+        return sendJson(res, 200, { needCode: true, message: '需要访问码' });
+
+      if (share.auth_mode === 'approve' || share.auth_mode === 'wechat') {
+        const ap = await db.getApproval(shareId, viewerToken);
+        if (!ap || ap.status !== 'approved') {
+          if (!ap) await db.touchApproval(shareId, viewerToken, nowMs());
+          if (share.auth_mode === 'wechat')
+            return sendJson(res, 200, { needWechat: true, message: '请使用微信扫码验证' });
+          return sendJson(res, 200, { needApproval: true, message: '已发送访问申请，等待分享者授权' });
+        }
+      }
+      return sendJson(res, 200, await grantAccess(share, viewerToken));
+    }
+
+    // 内容下发（需有效会话）
+    if (req.method === 'GET' && p.startsWith('/api/content/')) {
+      const shareId = p.split('/')[3];
+      const at = u.searchParams.get('at');
+      const sess = await db.getSession(at);
+      if (!sess || Number(sess.expires_at) < nowMs()) return sendJson(res, 403, { error: 'invalid_session' });
+      const share = await db.getShare(shareId);
+      if (!share || share.status !== 'active') return sendJson(res, 403, { error: 'destroyed' });
+      const file = await db.getFile(share.file_id);
+      if (!file) return sendJson(res, 404, { error: 'no_file' });
+      if (file.kind === 'docx') {
+        const html = await renderDocx(file);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(html);
+      }
+      const data = await storage.readBuffer(file.stored_name);
+      const ct = file.kind === 'pdf' ? 'application/pdf' : (file.mime || 'application/octet-stream');
+      res.writeHead(200, { 'Content-Type': ct, 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+      return res.end(data);
+    }
+
+    // 源文件预览图下发（需有效会话，与 /api/content 同等鉴权）
+    if (req.method === 'GET' && p.startsWith('/api/preview/')) {
+      const shareId = p.split('/')[3];
+      const at = u.searchParams.get('at');
+      const sess = await db.getSession(at);
+      if (!sess || Number(sess.expires_at) < nowMs()) return sendJson(res, 403, { error: 'invalid_session' });
+      const share = await db.getShare(shareId);
+      if (!share || share.status !== 'active') return sendJson(res, 403, { error: 'destroyed' });
+      const file = await db.getFile(share.file_id);
+      if (!file || !file.preview_path) return sendJson(res, 404, { error: 'no_preview' });
+      const data = await storage.readBuffer(file.preview_path);
+      const isJpg = /\.jpe?g$/i.test(file.preview_path);
+      res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+      return res.end(data);
+    }
+
+    // 访问日志上报
+    if (req.method === 'POST' && p === '/api/log') {
+      const body = JSON.parse(await readBody(req, 1 << 20));
+      await db.recordProgress({
+        shareId: body.shareId, viewerToken: body.viewerToken, ip: clientIp(req),
+        ua: req.headers['user-agent'] || '', event: body.event || 'progress',
+        progress: String(body.progress || ''), now: nowMs()
+      });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 管理后台：列出我的分享
+    if (req.method === 'GET' && p.startsWith('/api/admin/') && p.split('/').length === 4) {
+      const token = p.split('/')[3];
+      const o = await resolveOwner(token);
+      let shares;
+      if (o.type === 'user') shares = await db.listMySharesById(o.userId);
+      else shares = await db.listMySharesByOwnerToken(o.ownerToken);
+      const list = shares.map(s => ({
+        shareId: s.id, name: s.name, kind: s.kind, status: s.status,
+        opens: s.opens, viewers: s.viewers,
+        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
+        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
+        restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
+        createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
+      }));
+      return sendJson(res, 200, { shares: list });
+    }
+
+    // 管理后台：单条分享的访问日志
+    if (req.method === 'GET' && p.startsWith('/api/admin/') && p.endsWith('/logs')) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
+      const share = await manageShare(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      const logs = await db.getShareLogs(shareId);
+      return sendJson(res, 200, { logs });
+    }
+
+    // 管理后台：待授权列表
+    if (req.method === 'GET' && p.startsWith('/api/admin/') && p.endsWith('/approvals')) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
+      const share = await manageShare(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      const aps = await db.getPendingApprovals(shareId);
+      return sendJson(res, 200, { approvals: aps });
+    }
+
+    // 管理后台：销毁 / 恢复
+    if (req.method === 'POST' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/(destroy|restore)$/.test(p)) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5]; const action = parts[6];
+      const share = await manageShare(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      await db.setShareStatus(shareId, action === 'destroy' ? 'destroyed' : 'active', nowMs());
+      return sendJson(res, 200, { ok: true, status: action === 'destroy' ? 'destroyed' : 'active' });
+    }
+
+    // 管理后台：修改权限
+    if (req.method === 'PUT' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/settings$/.test(p)) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
+      const share = await manageShare(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      const s = JSON.parse(await readBody(req, 1 << 20));
+      await db.updateShareSettings(shareId, s, nowMs());
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 管理后台：审批
+    if (req.method === 'POST' && /\/api\/admin\/[^\/]+\/share\/[^\/]+\/approve$/.test(p)) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
+      const share = await manageShare(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const decision = b.decision === 'reject' ? 'rejected' : 'approved';
+      await db.upsertApproval(shareId, b.viewerToken, decision, nowMs());
+      return sendJson(res, 200, { ok: true, decision });
+    }
+
+    // ---------- 组织后台（店长） ----------
+    // 全店分享
+    if (req.method === 'GET' && p === '/api/org/shares') {
+      const admin = await requireAdmin(u.searchParams.get('userToken'));
+      if (!admin) return sendJson(res, 403, { error: 'no_admin' });
+      const shares = await db.listOrgShares(admin.org_id);
+      const list = shares.map(s => ({
+        shareId: s.id, name: s.name, kind: s.kind, status: s.status,
+        opens: s.opens, viewers: s.viewers, ownerEmail: s.owner_email || '(匿名)',
+        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
+        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
+        restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
+        createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
+      }));
+      return sendJson(res, 200, { shares: list });
+    }
+    // 成员列表
+    if (req.method === 'GET' && p === '/api/org/members') {
+      const admin = await requireAdmin(u.searchParams.get('userToken'));
+      if (!admin) return sendJson(res, 403, { error: 'no_admin' });
+      const members = await db.listOrgMembers(admin.org_id);
+      return sendJson(res, 200, { members: members.map(m => ({
+        id: m.id, email: m.email, role: m.role, createdAt: m.created_at
+      })) });
+    }
+    // 生成邀请码
+    if (req.method === 'POST' && p === '/api/org/invite') {
+      const admin = await requireAdmin(u.searchParams.get('userToken'));
+      if (!admin) return sendJson(res, 403, { error: 'no_admin' });
+      const code = crypto.randomBytes(4).toString('hex');
+      await db.createInvite({ code, orgId: admin.org_id, createdBy: admin.id, createdAt: nowMs() });
+      return sendJson(res, 200, { code });
+    }
+
+    return sendJson(res, 404, { error: 'route_not_found' });
+  } catch (e) {
+    console.error(e);
+    sendJson(res, 500, { error: 'server_error', message: String(e && e.message) });
+  }
+});
+
+db.init()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`安全分享服务已启动: http://localhost:${PORT}（数据库：${db.driverType()}）`);
+    });
+  })
+  .catch((err) => {
+    console.error('数据库初始化失败，服务未启动：', err);
+    process.exit(1);
+  });

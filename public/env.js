@@ -1,0 +1,33 @@
+'use strict';
+// 部署配置（公开信息，可提交到仓库）。上线前把下面三项填成你的真实值。
+window.API_BASE = '';            // 后端地址：留空=同源；上线填 Render 地址，如 https://fenxiang.onrender.com
+window.SUPABASE_URL = 'https://csggakvktvqxkugwwlef.supabase.co';        // 你的 Supabase 项目 URL
+window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzZ2dha3ZrdHZxeGt1Z3d3bGVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMDY1MjksImV4cCI6MjEwNDc4MjUyOX0.xewPj_t9f_E16jCAkl3KBGWqMN7_UXu7surLqukOz20';   // 你的 Supabase anon/public key（公开，可提交）
+window.FORCE_LEGACY_AUTH = false;// 设为 true 可强制走自研账号体系（不接 Supabase）
+
+// 是否启用 Supabase 身份体系（由上面配置；未配置或被强制关闭则回退自研账号）
+const USE_SUPABASE = !!(window.SUPABASE_URL && window.SUPABASE_ANON_KEY && !window.FORCE_LEGACY_AUTH);
+// 创建全局 Supabase 客户端（若已加载 supabase-js），并自动把最新 access_token 同步进 localStorage，
+// 解决 token 过期问题（Supabase 默认 1 小时过期，靠刷新令牌自动续期）。
+if (USE_SUPABASE && window.supabase) {
+  window.sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
+  const syncToken = (session) => { if (session) localStorage.setItem('userToken', session.access_token); };
+  window.sb.auth.onAuthStateChange((_event, session) => syncToken(session));
+  window.sb.auth.getSession().then(({ data }) => syncToken(data.session));
+  // 兜底：每 5 分钟再同步一次
+  setInterval(() => { window.sb.auth.getSession().then(({ data }) => syncToken(data.session)); }, 5 * 60 * 1000);
+}
+
+// 全局 fetch 包装：把相对 /api/ 请求自动指向 API_BASE（GitHub Pages 异源调用必需）。
+// 其他页面无需改动，所有 fetch('/api/...') 都会被这里接管。
+(function () {
+  var nativeFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (!nativeFetch) return;
+  window.fetch = function (input, init) {
+    if (typeof input === 'string' && input.indexOf('/api/') === 0 && window.API_BASE) {
+      var base = window.API_BASE.replace(/\/+$/, '');
+      input = base + input;
+    }
+    return nativeFetch(input, init);
+  };
+})();

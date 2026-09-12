@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>安全分享 · 管理后台</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">管理<span>后台</span></div>
+    <div class="top-right">
+      <span id="userArea" class="sub"></span>
+      <a class="sub" href="/">+ 新建分享</a>
+    </div>
+  </div>
+  <div class="tabs" id="tabs" style="display:none">
+    <button class="tab active" data-tab="mine">我的分享</button>
+    <button class="tab" data-tab="org">全店分享</button>
+    <button class="tab" data-tab="members">成员</button>
+    <button class="tab" data-tab="invite">邀请码</button>
+  </div>
+
+  <div id="list"></div>
+
+  <div id="orgPanel" style="display:none">
+    <div id="orgShares"></div>
+    <div id="orgMembers" style="display:none"></div>
+    <div id="orgInvite" style="display:none">
+      <button class="btn sm" id="genInvite">生成新邀请码</button>
+      <span id="inviteCode" class="tag on" style="margin-left:10px;display:none"></span>
+      <p class="sub" style="margin-top:8px">把邀请码发给同事，注册时填写即可加入本组织。</p>
+    </div>
+  </div>
+
+  <div class="empty" id="empty" style="display:none">还没有分享记录。<a href="/">去创建一个 →</a></div>
+</div>
+
+<div class="modal" id="logsModal">
+  <div class="box" style="max-width:640px;text-align:left">
+    <h2>访问记录</h2>
+    <div id="logsBody" style="max-height:60vh;overflow:auto"></div>
+    <button class="btn ghost sm" style="margin-top:12px" onclick="document.getElementById('logsModal').classList.remove('show')">关闭</button>
+  </div>
+</div>
+
+<div class="modal" id="editModal">
+  <div class="box" style="max-width:480px;text-align:left">
+    <h2>修改权限</h2>
+    <div id="editBody"></div>
+    <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">
+      <button class="btn ghost sm" onclick="document.getElementById('editModal').classList.remove('show')">取消</button>
+      <button class="btn sm" id="saveEdit">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="apprModal">
+  <div class="box" style="max-width:480px;text-align:left">
+    <h2>访问授权申请</h2>
+    <div id="apprBody"></div>
+    <button class="btn ghost sm" style="margin-top:12px" onclick="document.getElementById('apprModal').classList.remove('show')">关闭</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="/env.js"></script>
+<script src="/js/admin.js"></script>
+</body>
+</html>

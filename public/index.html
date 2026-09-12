@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>安全分享 · 创建分享</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">安全<span>分享</span></div>
+    <div class="top-right">
+      <span id="userArea" class="sub"></span>
+      <a class="sub" href="/admin.html">管理后台 →</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>① 选择要分享的文件</h2>
+    <div class="drop" id="drop">
+      <div>把文件拖到这里，或 <b>点击选择</b></div>
+      <div class="sub" style="margin-top:6px">支持 PDF / Word / 图片；单文件最大 200MB</div>
+    </div>
+    <input type="file" id="file" hidden />
+    <div class="fileinfo" id="fileinfo">
+      <div class="ic" id="fiIc">📄</div>
+      <div>
+        <div class="nm" id="fiNm"></div>
+        <div class="sz" id="fiSz"></div>
+      </div>
+      <a class="sub" href="#" id="fiClear" style="margin-left:auto">移除</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>② 设置访问权限</h2>
+    <div class="field">
+      <label>文件名称（展示给访客）</label>
+      <input id="name" placeholder="默认使用原文件名" />
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>有效期</label>
+        <select id="expire">
+          <option value="1">1 天</option>
+          <option value="7" selected>7 天</option>
+          <option value="30">30 天</option>
+          <option value="0">永久（不自动失效）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>访问码（留空则不设密码）</label>
+        <input id="code" placeholder="选填，访客需输入" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>最大访问人数（设备数，0=不限）</label>
+        <input id="maxViewers" type="number" min="0" value="0" />
+      </div>
+      <div class="field">
+        <label>最大阅读次数（0=不限）</label>
+        <input id="maxViews" type="number" min="0" value="0" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>单次阅读时长（分钟，0=不限）</label>
+        <input id="duration" type="number" min="0" value="0" />
+      </div>
+      <div class="field">
+        <label>验证方式</label>
+        <select id="authMode">
+          <option value="open">公开（任何人都可打开）</option>
+          <option value="approve">申请授权（需我批准后才能看）</option>
+          <option value="wechat">微信验证（访客需扫码确认）</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>水印文字（显示在预览上的防盗用信息）</label>
+      <input id="watermark" placeholder="如：内部资料 严禁外传" />
+    </div>
+    <div class="field">
+      <label>限制访客操作</label>
+      <div class="checks">
+        <label><input type="checkbox" id="rCopy" checked /> 禁止复制</label>
+        <label><input type="checkbox" id="rPrint" checked /> 禁止打印</label>
+        <label><input type="checkbox" id="rDownload" checked /> 禁止下载</label>
+        <label><input type="checkbox" id="rScreenshot" /> 防截图（动态水印）</label>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn" id="shareBtn" style="width:100%">立即分享</button>
+</div>
+
+<div class="modal" id="result">
+  <div class="box">
+    <h2 style="margin-bottom:6px">分享创建成功 🎉</h2>
+    <p class="sub">复制链接或扫码即可安全分享</p>
+    <img class="qr" id="qrImg" alt="二维码" />
+    <div class="linkbox">
+      <input id="linkInput" readonly />
+      <button class="btn sm" id="copyLink">复制</button>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <a class="btn ghost sm" id="openViewer" target="_blank">预览</a>
+      <a class="btn sm" id="openAdmin" target="_blank">进入管理后台</a>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="/env.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
