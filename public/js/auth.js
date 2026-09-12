@@ -3,8 +3,13 @@ const $ = (s) => document.querySelector(s);
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); };
 
 // 是否启用 Supabase 身份体系（由 env.js 配置；未配置或被强制关闭则回退自研账号）
-const USE_SUPABASE = !!(window.sb);
 const sb = window.sb || null;
+
+// 若未启用微信登录，隐藏整段微信入口
+if (!window.ENABLE_WECHAT_LOGIN) {
+  const wxSection = document.getElementById('wxSection');
+  if (wxSection) wxSection.style.display = 'none';
+}
 
 let mode = 'login'; // login | register
 
