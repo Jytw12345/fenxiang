@@ -16,7 +16,9 @@ function showUser(email) {
 }
 async function initUserArea() {
   const token = localStorage.getItem('userToken');
-  if (!token) return showLogin();
+  // 先显示登录入口，避免异步校验期间右上角空白
+  showLogin();
+  if (!token) return;
   try {
     const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(token), { cache: 'no-store' });
     if (!r.ok) throw new Error('session_invalid');

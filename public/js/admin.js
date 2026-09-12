@@ -19,10 +19,9 @@ function showUser(email) {
 }
 async function initUserArea() {
   const userToken = localStorage.getItem('userToken');
-  if (!userToken) {
-    if (isOwnerToken) showVisitor(); else showLogin();
-    return;
-  }
+  // 先显示默认入口，避免异步校验期间右上角空白
+  if (isOwnerToken) showVisitor(); else showLogin();
+  if (!userToken) return;
   try {
     const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(userToken), { cache: 'no-store' });
     if (!r.ok) throw new Error('session_invalid');
