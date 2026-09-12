@@ -60,6 +60,7 @@ $('#fiClear').addEventListener('click', (e) => { e.preventDefault(); selectedFil
 async function uploadAndShare() {
   if (!selectedFile) return toast('请先选择文件');
   const btn = $('#shareBtn'); btn.disabled = true; btn.textContent = '正在上传并加密…';
+  const userToken = localStorage.getItem('userToken');
   try {
     // 1) 上传原始字节
     const buf = await selectedFile.arrayBuffer();
