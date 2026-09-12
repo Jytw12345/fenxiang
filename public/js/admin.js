@@ -36,7 +36,10 @@ async function initUserArea() {
     if (d.email) localStorage.setItem('userEmail', d.email);
     showUser(d.email);
   } catch (e) {
-    logout();
+    // 令牌无效：清除并回到登录入口（不跳转、不重载，避免刷新死循环）
+    localStorage.removeItem('userToken');
+    localStorage.removeItem('userEmail');
+    if (isOwnerToken) showVisitor(); else showLogin();
   }
 }
 initUserArea();

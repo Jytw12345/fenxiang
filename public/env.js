@@ -12,11 +12,17 @@ const USE_SUPABASE = !!(window.SUPABASE_URL && window.SUPABASE_ANON_KEY && !wind
 // 解决 token 过期问题（Supabase 默认 1 小时过期，靠刷新令牌自动续期）。
 if (USE_SUPABASE && window.supabase) {
   window.sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
-  const syncToken = (session) => { if (session) localStorage.setItem('userToken', session.access_token); };
-  window.sb.auth.onAuthStateChange((_event, session) => syncToken(session));
-  window.sb.auth.getSession().then(({ data }) => syncToken(data.session));
-  // 兜底：每 5 分钟再同步一次
-  setInterval(() => { window.sb.auth.getSession().then(({ data }) => syncToken(data.session)); }, 5 * 60 * 1000);
+  // 仅当用户“已登录”（localStorage 中已有 userToken）时，才用 Supabase 刷新后的最新令牌覆盖，
+  // 解决 token 过期自动续期问题。
+  // 关键：绝不把浏览器残留的 Supabase 会话当成已登录态强行写入，否则会和后端 /api/auth/me
+  // 校验冲突，触发 “写入令牌 → 401 → 清令牌并重载 → 又写入” 的页面刷新死循环。
+  const refreshToken = (session) => {
+    if (session && localStorage.getItem('userToken')) {
+      localStorage.setItem('userToken', session.access_token);
+    }
+  };
+  window.sb.auth.onAuthStateChange((_event, session) => refreshToken(session));
+  window.sb.auth.getSession().then(({ data }) => refreshToken(data.session));
 }
 
 // 全局 fetch 包装：把相对 /api/ 请求自动指向 API_BASE（GitHub Pages 异源调用必需）。

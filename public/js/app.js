@@ -30,7 +30,11 @@ async function initUserArea() {
     if (d.email) localStorage.setItem('userEmail', d.email);
     showUser(d.email);
   } catch (e) {
-    logout();
+    // 令牌无效/过期：清除并回到登录入口，但不重载页面，
+    // 避免与 env.js 的 Supabase 会话同步形成刷新死循环。
+    localStorage.removeItem('userToken');
+    localStorage.removeItem('userEmail');
+    showLogin();
   }
 }
 initUserArea();
