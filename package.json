@@ -8,11 +8,11 @@
     "start": "node server/index.js"
   },
   "dependencies": {
+    "cos-nodejs-sdk-v5": "^2.11.0",
     "mammoth": "^1.8.0",
     "qrcode": "^1.5.4"
   },
   "optionalDependencies": {
-    "cos-nodejs-sdk-v5": "^2.11.0",
     "pg": "^8.11.0",
     "mysql2": "^3.6.0"
   }

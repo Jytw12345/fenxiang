@@ -5,19 +5,29 @@ const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 102
 
 let selectedFile = null;
 
-// 登录态展示
-const userToken = localStorage.getItem('userToken');
-const userEmail = localStorage.getItem('userEmail');
+// 登录态展示：向后端校验 token，避免本地残留过期 token 导致误判
 const userArea = document.getElementById('userArea');
-function renderUserArea() {
-  if (userToken) {
-    userArea.innerHTML = `👤 ${userEmail || '已登录'} · <a href="#" id="logoutLink">退出</a>`;
-    document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); location.reload(); };
-  } else {
-    userArea.innerHTML = `<a href="/auth.html">登录 / 注册</a>`;
+function logout() { localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); location.reload(); }
+function showLogin() { userArea.innerHTML = `<a href="/auth.html">登录 / 注册</a>`; }
+function showUser(email) {
+  const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  userArea.innerHTML = `👤 ${safe} · <a href="#" id="logoutLink">退出</a>`;
+  document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); logout(); };
+}
+async function initUserArea() {
+  const token = localStorage.getItem('userToken');
+  if (!token) return showLogin();
+  try {
+    const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(token), { cache: 'no-store' });
+    if (!r.ok) throw new Error('session_invalid');
+    const d = await r.json();
+    if (d.email) localStorage.setItem('userEmail', d.email);
+    showUser(d.email);
+  } catch (e) {
+    logout();
   }
 }
-renderUserArea();
+initUserArea();
 
 const drop = $('#drop'), fileInput = $('#file');
 drop.addEventListener('click', () => fileInput.click());

@@ -3,27 +3,37 @@ const $ = (s) => document.querySelector(s);
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); };
 
 let token = localStorage.getItem('userToken');
+let isOwnerToken = false;
 const ownerFromUrl = new URLSearchParams(location.search).get('token');
-if (!token && ownerFromUrl) { token = ownerFromUrl; localStorage.setItem('ownerToken', ownerFromUrl); }
-if (!token) token = localStorage.getItem('ownerToken');
+if (!token && ownerFromUrl) { token = ownerFromUrl; localStorage.setItem('ownerToken', ownerFromUrl); isOwnerToken = true; }
+if (!token) { token = localStorage.getItem('ownerToken'); if (token) isOwnerToken = true; }
 
 const userArea = document.getElementById('userArea');
-function renderUserArea() {
-  if (localStorage.getItem('userToken')) {
-    const email = localStorage.getItem('userEmail') || '已登录';
-    userArea.innerHTML = `👤 ${email} · <a href="#" id="logoutLink">退出</a>`;
-    document.getElementById('logoutLink').onclick = (e) => {
-      e.preventDefault();
-      localStorage.removeItem('userToken'); localStorage.removeItem('userEmail');
-      location.href = '/';
-    };
-  } else if (token) {
-    userArea.innerHTML = `<span>访客管理模式</span> · <a href="/auth.html">登录归集到我的分享</a>`;
-  } else {
-    userArea.innerHTML = `<a href="/auth.html">登录 / 注册</a>`;
+function logout() { localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); location.href = '/'; }
+function showLogin() { userArea.innerHTML = `<a href="/auth.html">登录 / 注册</a>`; }
+function showVisitor() { userArea.innerHTML = `<span>访客管理模式</span> · <a href="/auth.html">登录归集到我的分享</a>`; }
+function showUser(email) {
+  const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  userArea.innerHTML = `👤 ${safe} · <a href="#" id="logoutLink">退出</a>`;
+  document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); logout(); };
+}
+async function initUserArea() {
+  const userToken = localStorage.getItem('userToken');
+  if (!userToken) {
+    if (isOwnerToken) showVisitor(); else showLogin();
+    return;
+  }
+  try {
+    const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(userToken), { cache: 'no-store' });
+    if (!r.ok) throw new Error('session_invalid');
+    const d = await r.json();
+    if (d.email) localStorage.setItem('userEmail', d.email);
+    showUser(d.email);
+  } catch (e) {
+    logout();
   }
 }
-renderUserArea();
+initUserArea();
 
 if (!token) {
   document.getElementById('list').innerHTML = '<div class="empty">请先<a href="/auth.html">登录</a>，或打开创建分享时的「管理后台」链接。</div>';
