@@ -89,9 +89,37 @@
   </div>
 </div>
 
+<div class="modal" id="loginModal">
+  <div class="box" style="max-width:420px">
+    <h2 id="loginTitle">登录</h2>
+    <div id="loginMsg" class="sub" style="color:#e5484d;min-height:18px;margin-bottom:6px"></div>
+    <div class="field">
+      <label>邮箱</label>
+      <input id="loginEmail" placeholder="you@example.com" />
+    </div>
+    <div class="field">
+      <label>密码</label>
+      <input id="loginPw" type="password" placeholder="至少 8 位" />
+    </div>
+    <div class="field" id="loginInviteField" style="display:none">
+      <label>邀请码（选填，加入公司组织）</label>
+      <input id="loginInvite" placeholder="如已有公司邀请码请填写" />
+    </div>
+    <button class="btn" id="loginSubmit" style="width:100%">登录</button>
+    <p class="sub" style="text-align:center;margin-top:12px">
+      <a href="#" id="loginToggle">没有账号？去注册</a>
+    </p>
+    <div id="loginWxSection">
+      <div class="divider"><span>或</span></div>
+      <button class="btn ghost" id="loginWxBtn" style="width:100%">🟢 微信扫码登录</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="/env.js"></script>
+<script src="/js/login-modal.js"></script>
 <script src="/js/admin.js"></script>
 </body>
 </html>

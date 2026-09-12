@@ -33,17 +33,9 @@ async function bootstrapAndGo(token, email) {
   goApp(token, email);
 }
 
-// 已登录则直接进入 / 接管微信回调
-if (sb) {
-  sb.auth.getSession().then(async ({ data }) => {
-    if (data.session) {
-      localStorage.setItem('userToken', data.session.access_token);
-      await bootstrapAndGo(data.session.access_token, data.session.user && data.session.user.email);
-    } else {
-      localStorage.removeItem('userToken'); // 清理旧的自研令牌，避免误判
-    }
-  });
-} else if (localStorage.getItem('userToken')) {
+// 不自动跳转：避免 Supabase 会话与后端校验冲突导致反复重定向。
+// 仅在本地已有 userToken（自研模式）时提示“已登录”，否则由用户手动登录。
+if (!sb && localStorage.getItem('userToken')) {
   $('#formCard').style.display = 'none';
   $('#alreadyIn').style.display = 'block';
 }

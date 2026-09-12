@@ -8,12 +8,16 @@ let selectedFile = null;
 // 登录态展示：向后端校验 token，避免本地残留过期 token 导致误判
 const userArea = document.getElementById('userArea');
 function logout() { localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); location.reload(); }
-function showLogin() { userArea.innerHTML = `<a href="/auth.html">登录 / 注册</a>`; }
+function showLogin() {
+  userArea.innerHTML = `<a href="#" id="loginLink">登录 / 注册</a>`;
+  document.getElementById('loginLink').onclick = (e) => { e.preventDefault(); if (window.openLoginModal) window.openLoginModal(); };
+}
 function showUser(email) {
   const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   userArea.innerHTML = `👤 ${safe} · <a href="#" id="logoutLink">退出</a>`;
   document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); logout(); };
 }
+window.afterLogin = showUser; // 供 login-modal.js 登录成功后刷新右上角
 async function initUserArea() {
   const token = localStorage.getItem('userToken');
   // 先显示登录入口，避免异步校验期间右上角空白

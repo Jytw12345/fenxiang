@@ -10,13 +10,20 @@ if (!token) { token = localStorage.getItem('ownerToken'); if (token) isOwnerToke
 
 const userArea = document.getElementById('userArea');
 function logout() { localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); location.href = '/'; }
-function showLogin() { userArea.innerHTML = `<a href="/auth.html">登录 / 注册</a>`; }
-function showVisitor() { userArea.innerHTML = `<span>访客管理模式</span> · <a href="/auth.html">登录归集到我的分享</a>`; }
+function showLogin() {
+  userArea.innerHTML = `<a href="#" id="loginLink">登录 / 注册</a>`;
+  document.getElementById('loginLink').onclick = (e) => { e.preventDefault(); if (window.openLoginModal) window.openLoginModal(); };
+}
+function showVisitor() {
+  userArea.innerHTML = `<span>访客管理模式</span> · <a href="#" id="loginLink2">登录归集到我的分享</a>`;
+  document.getElementById('loginLink2').onclick = (e) => { e.preventDefault(); if (window.openLoginModal) window.openLoginModal(); };
+}
 function showUser(email) {
   const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   userArea.innerHTML = `👤 ${safe} · <a href="#" id="logoutLink">退出</a>`;
   document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); logout(); };
 }
+window.afterLogin = showUser; // 供 login-modal.js 登录成功后刷新右上角
 async function initUserArea() {
   const userToken = localStorage.getItem('userToken');
   // 先显示默认入口，避免异步校验期间右上角空白
