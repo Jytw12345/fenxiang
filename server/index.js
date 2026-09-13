@@ -126,7 +126,7 @@ function parsePrefs(raw) {
 async function resolveIdentity(token) {
   if (!token) return null;
   if (config.SUPABASE.enabled) {
-    const payload = verifySupabaseToken(token);
+    const payload = await verifySupabaseToken(token);
     if (!payload) return null;
     const u = await db.getUserBySupabaseId(payload.sub);
     return u ? { type: 'user', userId: u.id } : null;
@@ -440,7 +440,7 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse(await readBody(req, 1 << 20));
       const token = body.userToken || u.searchParams.get('userToken');
       if (!config.SUPABASE.enabled) return sendJson(res, 400, { error: 'supabase_disabled', message: '未启用 Supabase 身份体系' });
-      const payload = verifySupabaseToken(token);
+      const payload = await verifySupabaseToken(token);
       if (!payload) return sendJson(res, 401, { error: 'invalid_token' });
       const inviteCode = String(body.inviteCode || '').trim();
       const user = await db.ensureUser({ sub: payload.sub, email: payload.email || '', inviteCode });

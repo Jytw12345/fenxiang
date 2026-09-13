@@ -72,14 +72,16 @@ module.exports = {
   },
 
   // Supabase（身份提供方 + 托管 Postgres）。配置后前端用 supabase-js 登录，
-  // 后端用 JWT_SECRET 校验其签发的 JWT；不配置则回退到自研账号体系（兼容旧模式）。
+  // 后端直接拿令牌去问 Supabase 的 /auth/v1/user 端点做服务端校验（用公开的 anon key 即可），
+  // 不再依赖 JWT_SECRET，避免前后端密钥不一致导致永远 invalid_token。不配置则回退自研账号体系。
+  // JWT_SECRET 仍保留为可选字段（向后兼容），但已不再用于本地 HMAC 校验。
   SUPABASE: {
     URL: str(process.env.SUPABASE_URL, ''),
     ANON_KEY: str(process.env.SUPABASE_ANON_KEY, ''),
     JWT_SECRET: str(process.env.SUPABASE_JWT_SECRET, ''),
-    // 仅当三者齐全才启用 Supabase 身份体系
+    // 只要 URL + ANON_KEY 齐全即启用 Supabase 身份体系（服务端校验无需 JWT_SECRET）
     get enabled() {
-      return !!(this.URL && this.ANON_KEY && this.JWT_SECRET);
+      return !!(this.URL && this.ANON_KEY);
     }
   },
 
