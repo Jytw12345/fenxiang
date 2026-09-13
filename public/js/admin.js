@@ -4,8 +4,8 @@ const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add
 
 let token = localStorage.getItem('userToken');
 let isOwnerToken = false;
-const ownerFromUrl = new URLSearchParams(location.search).get('token');
-if (!token && ownerFromUrl) { token = ownerFromUrl; localStorage.setItem('ownerToken', ownerFromUrl); isOwnerToken = true; }
+// 安全：管理权（ownerToken）不再从 URL 读取，防止分享链接泄露后台管理权限。
+// 匿名创建者仅能在本机通过 localStorage 管理（下方回退）；换设备请登录归集到账号。
 if (!token) { token = localStorage.getItem('ownerToken'); if (token) isOwnerToken = true; }
 
 const userArea = document.getElementById('userArea');

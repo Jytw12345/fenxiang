@@ -261,7 +261,8 @@ async function finalizeWechat(state, openid, nickname) {
   const share = await db.getShare(state.share_id);
   if (!share) return { kind: 'verify', error: 'share_gone' };
   await db.upsertApproval(share.id, state.viewer_token, 'approved', nowMs());
-  const g = await grantAccess(share, state.viewer_token);
+  // 注意：此处没有原始 req（来自微信回调/模拟确认），grantAccess 的 req 仅用于 IP/UA 日志，传 null 安全
+  const g = await grantAccess(null, share, state.viewer_token);
   await db.setWechatVerifyIssued({ accessToken: g.accessToken, expiresIn: g.expiresIn, state: state.state });
   return { kind: 'verify', token: g.accessToken, expiresIn: g.expiresIn };
 }

@@ -95,8 +95,14 @@ async function uploadAndShare() {
     $('#qrImg').src = shRes.qr;
     $('#linkInput').value = location.origin + '/viewer.html?share=' + shRes.shareId;
     $('#openViewer').href = $('#linkInput').value;
-    const adminUrl = userToken ? '/admin.html' : '/admin.html?token=' + shRes.ownerToken;
-    $('#openAdmin').href = adminUrl;
+    // 管理权（ownerToken）不再写入 URL，避免“分享链接/管理链接”被误发后泄露后台管理权限。
+    // 已登录 → 走账号；匿名创建者 → 本机 localStorage 仍可管理；两者皆无 → 点击弹登录框。
+    $('#openAdmin').href = '/admin.html';
+    $('#openAdmin').onclick = (e) => {
+      const ut = localStorage.getItem('userToken');
+      const ot = localStorage.getItem('ownerToken');
+      if (!ut && !ot && window.openLoginModal) { e.preventDefault(); window.openLoginModal(); }
+    };
     localStorage.setItem('ownerToken', shRes.ownerToken);
     $('#result').classList.add('show');
   } catch (e) {
