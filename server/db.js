@@ -50,16 +50,30 @@ async function getUserBySupabaseId(sub) {
 }
 // 确保 Supabase 用户存在（首登自动建行 + 归属组织）。返回用户行或 { error }。
 async function ensureUser({ sub, email, inviteCode, realName = null }) {
-  const exist = await getUserBySupabaseId(sub);
-  if (exist) {
+  const lowerEmail = String(email || '').toLowerCase();
+  // 1) 优先按 supabase_id（sub）查：已绑定过的账号直接复用
+  const bySub = await getUserBySupabaseId(sub);
+  if (bySub) {
     // 已存在用户：若邮箱在超级管理员名单内且尚未标记，则同步提权。
     // 否则旧版已注册的老账号在新版上线后永远不会变成超级管理员。
-    if (config.SUPER_ADMIN_EMAILS.includes(String(email || '').toLowerCase()) && !exist.is_super) {
-      await setUserSuper(exist.id, 1);
-      const refreshed = await getUser(exist.id);
-      return refreshed || exist;
+    if (config.SUPER_ADMIN_EMAILS.includes(lowerEmail) && !bySub.is_super) {
+      await setUserSuper(bySub.id, 1);
+      const refreshed = await getUser(bySub.id);
+      return refreshed || bySub;
     }
-    return exist;
+    return bySub;
+  }
+  // 2) 再按邮箱查：兼容“老账号（自研注册，supabase_id 为空）首次改用 Supabase 登录”的场景，
+  //    避免用同一个邮箱重复建号触发 UNIQUE(email) 冲突导致 bootstrap 500。
+  const byEmail = lowerEmail ? (await drv.get('SELECT * FROM users WHERE LOWER(email)=?', [lowerEmail]) || null) : null;
+  if (byEmail) {
+    // 补上 supabase_id，下次即可按 sub 命中；必要时同步提权
+    await drv.run('UPDATE users SET supabase_id=? WHERE id=?', [sub || '', byEmail.id]);
+    if (config.SUPER_ADMIN_EMAILS.includes(lowerEmail) && !byEmail.is_super) {
+      await setUserSuper(byEmail.id, 1);
+    }
+    const refreshed = await getUser(byEmail.id);
+    return refreshed || byEmail;
   }
   const domain = (String(email || '').split('@')[1] || '').toLowerCase();
   let orgId = null, role = 'member';
