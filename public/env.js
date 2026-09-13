@@ -1,6 +1,7 @@
 'use strict';
 // 部署配置（公开信息，可提交到仓库）。上线前把下面三项填成你的真实值。
-window.API_BASE = 'https://fenxiang.onrender.com';            // 后端地址：留空=同源；上线填 Render 地址，如 https://fenxiang.onrender.com
+window.API_BASE = '';            // 后端地址：留空=同源（本地 127.0.0.1:3000 与 Render 同域名部署都用这个）；若前端在 GitHub Pages、后端在 Render 异源，才填 Render 地址
+
 // Supabase 公开配置（仅 URL 和 anon key，可提交到仓库）。
 // 注意：SUPABASE_JWT_SECRET 是服务端密钥，永远不要写在这个公开文件里，
 // 必须在后端 .env / 环境变量中配置，后端才会真正启用 Supabase 身份体系。
