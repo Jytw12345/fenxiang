@@ -6,7 +6,7 @@ const params = new URLSearchParams(location.search);
 const shareId = params.get('share');
 let viewerToken = localStorage.getItem('viewerToken');
 if (!viewerToken) { viewerToken = crypto.randomUUID(); localStorage.setItem('viewerToken', viewerToken); }
-let accessToken = null, restrictions = {}, watermarkText = '', kind = '', docName = '', expiresIn = 0, sessionStart = 0, hasPreview = false;
+let accessToken = null, restrictions = {}, watermarkText = '', kind = '', docName = '', expiresIn = 0, sessionStart = 0, hasPreview = false, previewPages = 0;
 
 function shortId() { return viewerToken.slice(0, 8); }
 
@@ -87,17 +87,20 @@ async function loadMeta() {
   if (!r.ok) { $('#gateTitle').textContent = '无法打开'; showGate('<p class="sub" style="text-align:center">' + (m.error || '链接无效') + '</p>'); return false; }
   if (m.status !== 'active') { $('#gateTitle').textContent = '文档已下架'; showGate('<p class="sub" style="text-align:center">该文档已被分享者销毁或下架。</p>'); return false; }
   docName = m.name; kind = m.kind; restrictions = m.restrictions; watermarkText = m.watermark; hasPreview = !!m.preview;
+  previewPages = (m.extra && Number(m.extra.previewPages) > 0) ? Number(m.extra.previewPages) : 0;
   $('#docName').textContent = docName;
-  const tags = [];
-  tags.push(m.requiresCode ? '<span class="tag on">需访问码</span>' : '');
-  tags.push(m.authMode === 'approve' ? '<span class="tag on">需授权</span>' : '');
-  if (m.kind === 'source') tags.push('<span class="tag">源文件</span>');
-  if (hasPreview) tags.push('<span class="tag on">可在线预览</span>');
-  if (restrictions.copy) tags.push('<span class="tag off">禁复制</span>');
-  if (restrictions.print) tags.push('<span class="tag off">禁打印</span>');
-  if (restrictions.download) tags.push('<span class="tag off">禁下载</span>');
-  if (restrictions.screenshot) tags.push('<span class="tag off">防截图</span>');
-  $('#restBadge').innerHTML = tags.join('');
+  // 右上角提示：仅显示对访客有实际影响的限制，用灰色小标签避免视觉污染
+  const hints = [];
+  if (m.requiresCode) hints.push({ icon: '🔐', text: '需访问码' });
+  if (m.authMode === 'approve') hints.push({ icon: '✋', text: '需授权' });
+  if (restrictions.copy) hints.push({ icon: '📋', text: '禁止复制' });
+  if (restrictions.print) hints.push({ icon: '🖨', text: '禁止打印' });
+  if (restrictions.download) hints.push({ icon: '⬇', text: '禁止下载' });
+  if (restrictions.screenshot) hints.push({ icon: '📷', text: '防截图' });
+  if (previewPages > 0) hints.push({ icon: '📄', text: `仅前 ${previewPages} 页` });
+  $('#restBadge').innerHTML = hints.length
+    ? hints.map(h => `<span class="vhint"><span class="vhi">${h.icon}</span><span>${h.text}</span></span>`).join('')
+    : '<span class="vhint"><span class="vhi">👁</span><span>可在线预览</span></span>';
   return m;
 }
 
@@ -183,7 +186,8 @@ async function loadContent(k) {
     if (!window.pdfjsLib) { $('#pages').innerHTML = '<p class="sub">PDF 组件加载失败（本地 PDF.js 缺失）</p>'; return; }
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    for (let i = 1; i <= pdf.numPages; i++) {
+    const limit = previewPages && previewPages < pdf.numPages ? previewPages : pdf.numPages;
+    for (let i = 1; i <= limit; i++) {
       const page = await pdf.getPage(i);
       const vp = page.getViewport({ scale: 1.4 });
       const canvas = document.createElement('canvas');
@@ -192,6 +196,14 @@ async function loadContent(k) {
       $('#pages').appendChild(canvas);
       await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
       report('progress', 'p' + i + '/' + pdf.numPages);
+    }
+    // 预览页数限制：未渲染的后续页不向访客展示
+    if (limit < pdf.numPages) {
+      const tip = document.createElement('div');
+      tip.className = 'sub';
+      tip.style.cssText = 'text-align:center;padding:24px;color:var(--danger);font-weight:600';
+      tip.textContent = `分享者限制仅可预览前 ${limit} 页，剩余 ${pdf.numPages - limit} 页不可查看`;
+      $('#pages').appendChild(tip);
     }
     return;
   }

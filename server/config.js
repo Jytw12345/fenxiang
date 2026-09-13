@@ -33,6 +33,15 @@ module.exports = {
   // 超级管理员邮箱（可选，逗号分隔）：这些账号注册/首登时自动成为全局超级管理员。
   // 同时，系统首个注册用户也会自动成为超级管理员（便于初始开通）。
   SUPER_ADMIN_EMAILS: str(process.env.SUPER_ADMIN_EMAILS, '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+  // 防恶意注册：同一 IP 在窗口期内最多注册数（超阈值直接拒绝，挡自动化批量注册）
+  REG_IP_LIMIT: Number(process.env.REG_IP_LIMIT) || 5,
+  // 同一邮箱在窗口期内最多尝试注册数（防撞库/枚举，合法用户偶尔重试也受限，故默认 3）
+  REG_EMAIL_LIMIT: Number(process.env.REG_EMAIL_LIMIT) || 3,
+  // 注册频率限制窗口（毫秒），默认 24 小时
+  REG_WINDOW_MS: Number(process.env.REG_WINDOW_MS) || (24 * 3600 * 1000),
+  // 邀请制注册：开启后普通邮箱必须携带有效邀请码才能注册（超级管理员不受影响）
+  // 部署时通过环境变量 INVITE_ONLY=1 开启
+  INVITE_ONLY: str(process.env.INVITE_ONLY, '0') !== '0',
   // 源文件在线预览：默认开启。设为 0 可关闭（全部转为仅下载）。
   PREVIEW_ENABLED: (str(process.env.PREVIEW_ENABLED, '1') !== '0'),
   // 单个文件预览转换超时（毫秒），默认 60s。超时被杀并降级为仅下载。

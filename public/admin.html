@@ -9,11 +9,12 @@
 <body>
 <aside class="side">
   <div class="brand">安全<span>分享</span></div>
-  <nav class="nav">
+  <nav class="nav" id="sideNav">
     <a href="/"><span class="ic">＋</span><span class="txt">创建分享</span></a>
-    <a href="/admin.html"><span class="ic">📁</span><span class="txt">我的分享</span></a>
-    <a class="active" href="/admin.html"><span class="ic">🛡</span><span class="txt">管理后台</span></a>
-    <a href="#"><span class="ic">⚙</span><span class="txt">设置</span></a>
+    <a class="nav-auth" href="/admin.html" data-key="mine"><span class="ic">📁</span><span class="txt">我的分享</span></a>
+    <a class="nav-auth" href="/admin.html#files" data-key="files"><span class="ic">🗂</span><span class="txt">文件管理</span></a>
+    <a class="nav-super" href="/admin.html#super" data-key="super"><span class="ic">🛡</span><span class="txt">管理后台</span></a>
+    <a class="nav-auth" href="/settings.html"><span class="ic">⚙</span><span class="txt">设置</span></a>
   </nav>
   <div class="me">
     <div class="av">安</div>
@@ -32,11 +33,13 @@
   <div class="wrap">
   <div class="tabs" id="tabs" style="display:none">
     <button class="tab active" data-tab="mine">我的分享</button>
+    <button class="tab" data-tab="files" id="tabFiles">文件管理</button>
     <button class="tab" data-tab="org">全店分享</button>
     <button class="tab" data-tab="members">成员</button>
     <button class="tab" data-tab="invite">邀请码</button>
     <button class="tab" data-tab="allshares" id="tabAllShares" style="display:none">全部分享</button>
     <button class="tab" data-tab="stats" id="tabStats" style="display:none">存储用量</button>
+    <button class="tab" data-tab="dashboard" id="tabDashboard" style="display:none">数据概览</button>
     <button class="tab" data-tab="users" id="tabUsers" style="display:none">用户管理</button>
     <button class="tab" data-tab="audit" id="tabAudit" style="display:none">操作日志</button>
   </div>
@@ -59,6 +62,9 @@
     <div id="superUsers" style="display:none"></div>
     <div id="superAudit" style="display:none"></div>
   </div>
+
+  <div id="filesPanel" style="display:none"></div>
+  <div id="dashboardPanel" style="display:none"></div>
 
   <div class="empty" id="empty" style="display:none">还没有分享记录。<a href="/">去创建一个 →</a></div>
   </div>
@@ -92,29 +98,45 @@
 </div>
 
 <div class="modal" id="loginModal">
-  <div class="box" style="max-width:420px">
-    <h2 id="loginTitle">登录</h2>
-    <div id="loginMsg" class="sub" style="color:#e5484d;min-height:18px;margin-bottom:6px"></div>
-    <div class="field">
+  <div class="box login-box">
+    <button class="modal-close" id="loginClose" aria-label="关闭">×</button>
+    <div class="login-head">
+      <div class="login-logo">🔐</div>
+      <h2 id="loginTitle">欢迎回来</h2>
+      <p class="sub" id="loginSub">登录以管理你的安全分享</p>
+    </div>
+    <div class="seg">
+      <button type="button" class="seg-btn active" id="loginTabLogin" data-mode="login">登录</button>
+      <button type="button" class="seg-btn" id="loginTabReg" data-mode="register">注册</button>
+    </div>
+    <div id="loginMsg" class="form-msg"></div>
+    <div class="field login-field">
       <label>邮箱</label>
-      <input id="loginEmail" placeholder="you@example.com" />
+      <input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="username" />
     </div>
-    <div class="field">
+    <div class="field login-field">
       <label>密码</label>
-      <input id="loginPw" type="password" placeholder="至少 8 位" />
+      <div class="pw-wrap">
+        <input id="loginPw" type="password" placeholder="至少 8 位" autocomplete="current-password" />
+        <button type="button" class="pw-toggle" id="loginPwToggle" aria-label="显示或隐藏密码" title="显示/隐藏密码">👁️</button>
+      </div>
     </div>
-    <div class="field" id="loginRealNameField" style="display:none">
+    <label class="remember-row">
+      <input type="checkbox" id="loginRemember" />
+      <span>记住密码（本机保存，7 天内自动登录）</span>
+    </label>
+    <div class="field login-field" id="loginRealNameField" style="display:none">
       <label>真实姓名（必填）</label>
-      <input id="loginRealName" placeholder="请输入真实姓名" />
+      <input id="loginRealName" placeholder="请输入真实姓名" autocomplete="name" />
     </div>
-    <div class="field" id="loginInviteField" style="display:none">
+    <div class="field login-field" id="loginInviteField" style="display:none">
       <label>邀请码（选填，加入公司组织）</label>
       <input id="loginInvite" placeholder="如已有公司邀请码请填写" />
     </div>
-    <button class="btn" id="loginSubmit" style="width:100%">登录</button>
-    <p class="sub" style="text-align:center;margin-top:12px">
-      <a href="#" id="loginToggle">没有账号？去注册</a>
-    </p>
+    <!-- 蜜罐字段：真实用户不可见，自动化机器人若自动填充将被后端拒绝 -->
+    <div class="hp" aria-hidden="true"><input type="text" id="loginCompany" tabindex="-1" autocomplete="off" /></div>
+    <button class="btn" id="loginSubmit" style="width:100%;margin-top:4px">登录</button>
+    <p class="sub login-foot" id="loginFoot">点击「注册」即表示同意内部使用规范</p>
     <div id="loginWxSection">
       <div class="divider"><span>或</span></div>
       <button class="btn ghost" id="loginWxBtn" style="width:100%">🟢 微信扫码登录</button>
@@ -123,6 +145,8 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<!-- 替换文件用的隐藏文件选择器（分享卡片与文件管理共用） -->
+<input type="file" id="replaceFileInput" style="display:none" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="/env.js"></script>
 <script src="/js/login-modal.js"></script>

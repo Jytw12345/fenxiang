@@ -141,6 +141,10 @@ async function getUserEmail(userId) {
   const row = await drv.get('SELECT email FROM users WHERE id=?', [userId]);
   return row ? row.email : null;
 }
+// 改密后废除该用户除 keepToken 外的其它会话令牌
+async function revokeOtherTokens(userId, keepToken) {
+  await drv.run('DELETE FROM user_tokens WHERE user_id=? AND token<>?', [userId, keepToken || '']);
+}
 
 // ---------- 微信状态机 ----------
 async function createWechatState({ state, userId = null, openid = null, status = 'pending', createdAt, purpose, shareId = null, viewerToken, expiresAt }) {
@@ -168,23 +172,53 @@ async function createFile({ id, originalName, storedName, mime, size, kind, prev
 async function getFile(id) {
   return drv.get('SELECT * FROM files WHERE id=?', [id]) || null;
 }
+// 替换文件：保持 file_id 不变（分享链接因此永远不变），仅更新存储名/类型/大小/预览。
+async function replaceFileById(fileId, fields) {
+  await drv.run('UPDATE files SET stored_name=?, mime=?, size=?, kind=?, preview_path=?, original_name=? WHERE id=?',
+    [fields.storedName, fields.mime, fields.size, fields.kind, fields.previewPath || null, fields.originalName || '', fileId]);
+}
+// 引用某文件的分享（用于权限校验与删除拦截）
+async function listSharesByFile(fileId) {
+  return drv.all(`SELECT s.id, s.name, s.owner_id, s.status, u.email AS owner_email
+    FROM shares s LEFT JOIN users u ON s.owner_id=u.id WHERE s.file_id=? ORDER BY s.created_at DESC`, [fileId]);
+}
+async function countSharesByFile(fileId) {
+  const row = await drv.get('SELECT COUNT(*) AS c FROM shares WHERE file_id=?', [fileId]);
+  return row ? Number(row.c) : 0;
+}
+// 我的文件：通过“我创建的分享所引用的文件”反查（文件本身无 owner 字段，归属由分享决定）
+async function listFilesForUser(userId) {
+  return drv.all(`SELECT f.id, f.original_name AS name, f.stored_name, f.mime, f.size, f.kind, f.preview_path, f.created_at AS createdAt,
+      (SELECT COUNT(*) FROM shares s WHERE s.file_id=f.id) AS share_count,
+      (SELECT s.id FROM shares s WHERE s.file_id=f.id ORDER BY s.created_at DESC LIMIT 1) AS share_id,
+      (SELECT s.name FROM shares s WHERE s.file_id=f.id ORDER BY s.created_at DESC LIMIT 1) AS share_name
+    FROM files f WHERE f.id IN (SELECT file_id FROM shares WHERE owner_id=?) ORDER BY f.created_at DESC`, [userId]);
+}
+// 全部文件（超管）：含孤儿文件；owner 通过任意引用它的分享推断
+async function listAllFiles() {
+  return drv.all(`SELECT f.id, f.original_name AS name, f.stored_name, f.mime, f.size, f.kind, f.preview_path, f.created_at AS createdAt,
+      (SELECT COUNT(*) FROM shares s WHERE s.file_id=f.id) AS share_count,
+      (SELECT u.email FROM shares s JOIN users u ON s.owner_id=u.id WHERE s.file_id=f.id LIMIT 1) AS owner_email
+    FROM files f ORDER BY f.created_at DESC`);
+}
 
 // ---------- 分享 ----------
-async function createShare({ shareId, fileId, ownerId, ownerToken, name, kind, maxViewers, maxViews, durationSec, expiresAt, accessCode, authMode, watermark, restrictions, createdAt }) {
+async function createShare({ shareId, fileId, ownerId, ownerToken, name, kind, maxViewers, maxViews, durationSec, expiresAt, accessCode, authMode, watermark, restrictions, extra, createdAt }) {
+  const extraStr = extra ? JSON.stringify(extra) : '';
   await drv.run(`INSERT INTO shares
-    (id,file_id,owner_id,owner_token,name,kind,status,max_viewers,max_views,duration_sec,expires_at,access_code,auth_mode,watermark,disable_copy,disable_print,disable_download,disable_screenshot,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    (id,file_id,owner_id,owner_token,name,kind,status,max_viewers,max_views,duration_sec,expires_at,access_code,auth_mode,watermark,disable_copy,disable_print,disable_download,disable_screenshot,extra,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [shareId, fileId, ownerId, ownerToken, name, kind, 'active',
       maxViewers || 0, maxViews || 0, durationSec || 0,
       expiresAt || null, accessCode || null, authMode, watermark || '',
       restrictions.copy ? 1 : 0, restrictions.print ? 1 : 0, restrictions.download ? 1 : 0, restrictions.screenshot ? 1 : 0,
-      createdAt, createdAt]);
+      extraStr, createdAt, createdAt]);
 }
 async function getShare(id) {
   return drv.get('SELECT * FROM shares WHERE id=?', [id]) || null;
 }
 async function getShareMeta(id) {
-  return drv.get(`SELECT s.id,s.name,s.kind,s.status,s.max_viewers,s.max_views,s.duration_sec,s.expires_at,s.access_code,s.auth_mode,s.watermark,s.disable_copy,s.disable_print,s.disable_download,s.disable_screenshot,
+  return drv.get(`SELECT s.id,s.name,s.kind,s.status,s.max_viewers,s.max_views,s.duration_sec,s.expires_at,s.access_code,s.auth_mode,s.watermark,s.disable_copy,s.disable_print,s.disable_download,s.disable_screenshot,s.extra,
       f.preview_path
     FROM shares s LEFT JOIN files f ON s.file_id=f.id WHERE s.id=?`, [id]) || null;
 }
@@ -193,8 +227,9 @@ async function setShareStatus(shareId, status, now) {
 }
 async function updateShareSettings(shareId, s, now) {
   const am = (s.authMode === 'approve' || s.authMode === 'wechat') ? s.authMode : 'open';
-  await drv.run(`UPDATE shares SET max_viewers=?,max_views=?,duration_sec=?,expires_at=?,access_code=?,auth_mode=?,watermark=?,disable_copy=?,disable_print=?,disable_download=?,disable_screenshot=?,updated_at=? WHERE id=?`,
-    [Number(s.maxViewers) || 0, Number(s.maxViews) || 0, Number(s.durationSec) || 0, s.expiresAt ? Number(s.expiresAt) : null, s.accessCode || null, am, s.watermark || '', s.disableCopy ? 1 : 0, s.disablePrint ? 1 : 0, s.disableDownload ? 1 : 0, s.disableScreenshot ? 1 : 0, now, shareId]);
+  const extraStr = s.extra ? (typeof s.extra === 'string' ? s.extra : JSON.stringify(s.extra)) : '';
+  await drv.run(`UPDATE shares SET max_viewers=?,max_views=?,duration_sec=?,expires_at=?,access_code=?,auth_mode=?,watermark=?,disable_copy=?,disable_print=?,disable_download=?,disable_screenshot=?,extra=?,updated_at=? WHERE id=?`,
+    [Number(s.maxViewers) || 0, Number(s.maxViews) || 0, Number(s.durationSec) || 0, s.expiresAt ? Number(s.expiresAt) : null, s.accessCode || null, am, s.watermark || '', s.disableCopy ? 1 : 0, s.disablePrint ? 1 : 0, s.disableDownload ? 1 : 0, s.disableScreenshot ? 1 : 0, extraStr, now, shareId]);
 }
 
 // ---------- 访问统计与审批 ----------
@@ -303,6 +338,17 @@ async function listAllUsers() {
 async function setUserDisabled(id, val) { await drv.run('UPDATE users SET disabled=? WHERE id=?', [val ? 1 : 0, id]); }
 async function setUserRole(id, role) { await drv.run('UPDATE users SET role=? WHERE id=?', [role === 'admin' ? 'admin' : 'member', id]); }
 async function setUserSuper(id, val) { await drv.run('UPDATE users SET is_super=? WHERE id=?', [val ? 1 : 0, id]); }
+// 修改密码（由后端校验旧密码强度后调用，传入新的 salt/hash）
+async function updateUserPassword(id, salt, hash) { await drv.run('UPDATE users SET salt=?, password_hash=? WHERE id=?', [salt, hash, id]); }
+// 修改资料：真实姓名 + 默认分享参数（prefs 为 JSON 字符串）
+async function updateUserProfile(id, { realName, prefs }) {
+  const sets = [], args = [];
+  if (realName !== undefined) { sets.push('real_name=?'); args.push(realName); }
+  if (prefs !== undefined) { sets.push('prefs=?'); args.push(prefs || ''); }
+  if (!sets.length) return;
+  args.push(id);
+  await drv.run('UPDATE users SET ' + sets.join(', ') + ' WHERE id=?', args);
+}
 async function deleteUser(id) {
   await drv.run('DELETE FROM user_tokens WHERE user_id=?', [id]);
   await drv.run('DELETE FROM users WHERE id=?', [id]);
@@ -338,7 +384,47 @@ async function recordAudit(actorId, action, target, detail) {
     [uuid(), actorId || '', action, target || '', detail || '', Date.now()]);
 }
 async function listAudit(limit = 200) {
-  return drv.all('SELECT actor_id, action, target, detail, created_at FROM audit_logs ORDER BY created_at DESC LIMIT ?', [limit]);
+  return drv.all(`SELECT a.actor_id, a.action, a.target, a.detail, a.created_at,
+      u.email AS actor_email, u.real_name AS actor_real_name
+    FROM audit_logs a
+    LEFT JOIN users u ON u.id = a.actor_id
+    ORDER BY a.created_at DESC LIMIT ?`, [limit]);
+}
+
+// ---------- 数据概览（超管全局 / 普通用户仅本人）----------
+async function dashboardTotals(ownerId, isSuper) {
+  let fileCount, shareCount, totalOpens, totalViewers;
+  if (isSuper) {
+    let r = await drv.get('SELECT COUNT(*) AS c FROM files'); fileCount = Number(r.c);
+    r = await drv.get('SELECT COUNT(*) AS c FROM shares'); shareCount = Number(r.c);
+    r = await drv.get("SELECT COUNT(*) AS c FROM logs WHERE event='open'"); totalOpens = Number(r.c);
+    r = await drv.get("SELECT COUNT(DISTINCT viewer_token) AS c FROM logs WHERE event='open'"); totalViewers = Number(r.c);
+  } else {
+    let r = await drv.get('SELECT COUNT(DISTINCT file_id) AS c FROM shares WHERE owner_id=?', [ownerId]); fileCount = Number(r.c);
+    r = await drv.get('SELECT COUNT(*) AS c FROM shares WHERE owner_id=?', [ownerId]); shareCount = Number(r.c);
+    r = await drv.get("SELECT COUNT(*) AS c FROM logs l WHERE l.event='open' AND l.share_id IN (SELECT id FROM shares WHERE owner_id=?)", [ownerId]); totalOpens = Number(r.c);
+    r = await drv.get("SELECT COUNT(DISTINCT l.viewer_token) AS c FROM logs l WHERE l.event='open' AND l.share_id IN (SELECT id FROM shares WHERE owner_id=?)", [ownerId]); totalViewers = Number(r.c);
+  }
+  return { fileCount, shareCount, totalOpens, totalViewers };
+}
+async function dashboardTopShares(ownerId, isSuper) {
+  const where = isSuper ? '' : ' WHERE s.owner_id=?';
+  const params = isSuper ? [] : [ownerId];
+  return drv.all(`SELECT s.id, s.name, u.email AS owner_email,
+      (SELECT COUNT(*) FROM logs l WHERE l.share_id=s.id AND l.event='open') AS opens,
+      (SELECT COUNT(DISTINCT l.viewer_token) FROM logs l WHERE l.share_id=s.id AND l.event='open') AS viewers
+    FROM shares s LEFT JOIN users u ON s.owner_id=u.id ${where} ORDER BY opens DESC LIMIT 10`, params);
+}
+async function dashboardRecentViewers(ownerId, isSuper) {
+  const where = isSuper ? "WHERE l.event='open'" : "WHERE l.event='open' AND s.owner_id=?";
+  const params = isSuper ? [] : [ownerId];
+  return drv.all(`SELECT l.viewer_token,
+      MAX(l.created_at) AS last_at, COUNT(*) AS events,
+      MAX(s.name) AS share_name, MAX(u.email) AS owner_email,
+      MAX(l.country) AS country, MAX(l.region) AS region, MAX(l.city) AS city,
+      MAX(l.ip) AS ip, MAX(l.device) AS device, MAX(l.os) AS os, MAX(l.browser) AS browser
+    FROM logs l LEFT JOIN shares s ON l.share_id=s.id LEFT JOIN users u ON s.owner_id=u.id
+    ${where} GROUP BY l.viewer_token ORDER BY last_at DESC LIMIT 20`, params);
 }
 
 module.exports = {
@@ -351,7 +437,7 @@ module.exports = {
   // wechat
   createWechatState, getWechatState, confirmWechatState, setWechatLoginToken, setWechatVerifyIssued,
   // files
-  createFile, getFile,
+  createFile, getFile, replaceFileById, listSharesByFile, countSharesByFile, listFilesForUser, listAllFiles,
   // shares
   createShare, getShare, getShareMeta, setShareStatus, updateShareSettings,
   // access control / approvals
@@ -362,7 +448,9 @@ module.exports = {
   listMySharesById, listMySharesByOwnerToken,
   // super admin
   listAllShares, listAllUsers, setUserDisabled, setUserRole, setUserSuper,
+  updateUserPassword, updateUserProfile, revokeOtherTokens,
   getUserByEmail, deleteUser, statsStorage, orphanFiles, deleteFileRow, deleteShareRow, recordAudit, listAudit,
+  dashboardTotals, dashboardTopShares, dashboardRecentViewers,
   // 直接透传底层（极少数方言无关操作）
   get: (sql, params) => drv.get(sql, params),
   all: (sql, params) => drv.all(sql, params),

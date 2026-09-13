@@ -3,7 +3,7 @@
 window.API_BASE = '';            // 后端地址：留空=同源；上线填 Render 地址，如 https://fenxiang.onrender.com
 window.SUPABASE_URL = 'https://csggakvktvqxkugwwlef.supabase.co';        // 你的 Supabase 项目 URL
 window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzZ2dha3ZrdHZxeGt1Z3d3bGVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMDY1MjksImV4cCI6MjEwNDc4MjUyOX0.xewPj_t9f_E16jCAkl3KBGWqMN7_UXu7surLqukOz20';   // 你的 Supabase anon/public key（公开，可提交）
-window.FORCE_LEGACY_AUTH = false;// 设为 true 可强制走自研账号体系（不接 Supabase）
+window.FORCE_LEGACY_AUTH = false// 设为 true 可强制走自研账号体系（不接 Supabase）；本地自托管部署必须 true，否则会用 Supabase 令牌登录、被后端拒绝
 window.ENABLE_WECHAT_LOGIN = false;// 设为 true 才显示「微信扫码登录」按钮（需先在 Supabase 或微信开放平台配好）
 
 // 是否启用 Supabase 身份体系（由上面配置；未配置或被强制关闭则回退自研账号）

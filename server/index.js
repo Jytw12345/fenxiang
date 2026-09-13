@@ -15,6 +15,23 @@ const PORT = config.PORT;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_UPLOAD = 200 * 1024 * 1024; // 200MB
 
+// 注册频率限制（进程内存计数，足以拦截自动化批量注册；服务重启清零，单机场景足够）
+const regAttempts = new Map(); // key -> { count, first }
+function regSweep() {
+  const now = Date.now();
+  for (const [k, v] of regAttempts) if (now - v.first > config.REG_WINDOW_MS) regAttempts.delete(k);
+}
+function regCount(key) {
+  const e = regAttempts.get(key);
+  if (!e || Date.now() - e.first > config.REG_WINDOW_MS) { regAttempts.set(key, { count: 0, first: Date.now() }); return 0; }
+  return e.count;
+}
+function regHit(key) {
+  const e = regAttempts.get(key);
+  if (!e) regAttempts.set(key, { count: 1, first: Date.now() });
+  else e.count++;
+}
+
 // ---------- 工具 ----------
 function uuid() { return crypto.randomBytes(16).toString('hex'); }
 function nowMs() { return Date.now(); }
@@ -97,6 +114,11 @@ function validatePassword(pw) {
   const weak = ['12345678', 'password', 'qwerty123', '11111111', 'abcdefgh', '1234567890', 'qwertyui'];
   if (weak.includes(pw.toLowerCase())) return '密码过于常见，请更换';
   return null;
+}
+// 解析用户 prefs（JSON 字符串 -> 对象；异常时回退空对象）
+function parsePrefs(raw) {
+  if (!raw) return {};
+  try { const o = JSON.parse(raw); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; }
 }
 
 // ---------- 鉴权辅助 ----------
@@ -302,9 +324,27 @@ const server = http.createServer(async (req, res) => {
       const pwErr = validatePassword(pw);
       if (pwErr) return sendJson(res, 400, { error: 'weak_password', message: pwErr });
       if (!realName) return sendJson(res, 400, { error: 'real_name_required', message: '请填写真实姓名' });
+
+      // —— 防恶意注册 ——
+      // 1) 蜜罐：隐藏字段被自动填充即判定为机器人，直接拒绝（不消耗数据库查询）
+      if (String(b.company || '').trim()) return sendJson(res, 400, { error: 'bot_detected', message: '注册请求被拒绝' });
+      // 2) 频率限制：同一 IP / 同一邮箱在窗口期内最多注册 N 次
+      const regIp = clientIp(req);
+      regSweep();
+      if (regIp && regCount('ip:' + regIp) >= config.REG_IP_LIMIT)
+        return sendJson(res, 429, { error: 'too_many_registrations', message: '当前网络 24 小时内注册次数过多，请稍后再试或联系管理员' });
+      if (regCount('email:' + email) >= config.REG_EMAIL_LIMIT)
+        return sendJson(res, 429, { error: 'too_many_registrations', message: '该邮箱 24 小时内注册尝试过多，请稍后再试' });
+      // 3) 邀请制：开启后普通邮箱必须携带有效邀请码（超级管理员不受限）
+      const isSuper = config.SUPER_ADMIN_EMAILS.includes(email);
+      if (config.INVITE_ONLY && !isSuper && !inviteCode)
+        return sendJson(res, 400, { error: 'invite_required', message: '当前为邀请制注册，请填写有效的公司邀请码' });
+      // 计入本次尝试（用于窗口期统计）
+      if (regIp) regHit('ip:' + regIp);
+      regHit('email:' + email);
+
       if (await db.findUserByEmail(email)) return sendJson(res, 409, { error: 'email_exists', message: '该邮箱已注册' });
       // 超级管理员：仅由 SUPER_ADMIN_EMAILS 名单指定（不再把首个注册用户自动设为超管）
-      const isSuper = config.SUPER_ADMIN_EMAILS.includes(email);
       let orgRes;
       if (isSuper) {
         const domain = (String(email).split('@')[1] || '').toLowerCase();
@@ -318,6 +358,8 @@ const server = http.createServer(async (req, res) => {
       const { salt, hash } = hashPassword(pw);
       const uid = uuid();
       await db.createUser({ id: uid, email, salt, hash, openid: null, createdAt: nowMs(), orgId: orgRes.orgId, role: orgRes.role, isSuper, realName });
+      // 记录注册行为，便于审计日志按“用户/关键词”追溯新账号
+      await db.recordAudit(uid, 'create_user', uid, 'email=' + email);
       const token = uuid();
       await db.createUserToken({ token, userId: uid, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
       return sendJson(res, 200, { userToken: token, email, role: orgRes.role, isSuper });
@@ -348,7 +390,49 @@ const server = http.createServer(async (req, res) => {
       const email = user ? user.email : '微信用户';
       let orgName = '';
       if (user && user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
-      return sendJson(res, 200, { email, realName: user ? (user.real_name || '') : '', role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false });
+      return sendJson(res, 200, { email, realName: user ? (user.real_name || '') : '', role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false, prefs: user ? parsePrefs(user.prefs) : {} });
+    }
+    if (req.method === 'PUT' && p === '/api/auth/profile') {
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const token = b.userToken || u.searchParams.get('userToken');
+      const idn = await resolveIdentity(token);
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_session' });
+      const user = await db.getUser(idn.userId);
+      if (!user) return sendJson(res, 404, { error: 'no_user' });
+      if (user.disabled) return sendJson(res, 403, { error: 'disabled', message: '该账号已被禁用，请联系管理员' });
+      const patch = {};
+      if (b.realName !== undefined) {
+        const rn = String(b.realName || '').trim();
+        if (!rn) return sendJson(res, 400, { error: 'real_name_required', message: '真实姓名不能为空' });
+        patch.realName = rn;
+      }
+      if (b.prefs !== undefined) {
+        if (typeof b.prefs !== 'object' || b.prefs === null || Array.isArray(b.prefs)) return sendJson(res, 400, { error: 'bad_prefs', message: '默认参数格式错误' });
+        patch.prefs = JSON.stringify(b.prefs);
+      }
+      if (Object.keys(patch).length) await db.updateUserProfile(user.id, patch);
+      const refreshed = await db.getUser(user.id);
+      return sendJson(res, 200, { ok: true, realName: refreshed.real_name || '', prefs: parsePrefs(refreshed.prefs) });
+    }
+    if (req.method === 'POST' && p === '/api/auth/change-password') {
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const token = b.userToken || u.searchParams.get('userToken');
+      const idn = await resolveIdentity(token);
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_session' });
+      const user = await db.getUser(idn.userId);
+      if (!user) return sendJson(res, 404, { error: 'no_user' });
+      if (user.disabled) return sendJson(res, 403, { error: 'disabled', message: '该账号已被禁用，请联系管理员' });
+      const oldPw = String(b.oldPassword || '');
+      const newPw = String(b.newPassword || '');
+      if (!verifyPassword(oldPw, user.salt, user.password_hash)) return sendJson(res, 400, { error: 'bad_old', message: '原密码错误' });
+      const pwErr = validatePassword(newPw);
+      if (pwErr) return sendJson(res, 400, { error: 'weak_password', message: pwErr });
+      if (oldPw === newPw) return sendJson(res, 400, { error: 'same_password', message: '新密码不能与原密码相同' });
+      const { salt, hash } = hashPassword(newPw);
+      await db.updateUserPassword(user.id, salt, hash);
+      // 改密后废除其它会话，仅保留当前令牌（提升安全性）
+      await db.revokeOtherTokens(user.id, token);
+      return sendJson(res, 200, { ok: true });
     }
 
     // Supabase 用户首登：确保本地用户行 + 归属组织（邀请码 / 域名 / 开放多租户）
@@ -484,6 +568,7 @@ const server = http.createServer(async (req, res) => {
         expiresAt: s.expiresAt ? Number(s.expiresAt) : null, accessCode: s.accessCode || null, authMode: am,
         watermark: s.watermark || '',
         restrictions: { copy: !!s.disableCopy, print: !!s.disablePrint, download: !!s.disableDownload, screenshot: !!s.disableScreenshot },
+        extra: s.extra || null,
         createdAt: nowMs()
       });
       const link = `${(config.BASE_URL || u.origin)}/viewer.html?share=${shareId}`;
@@ -492,12 +577,122 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { shareId, ownerToken, link, qr, name: s.name || file.original_name });
     }
 
+    // 文件列表（登录可见；超管 scope=all 看全部，并可按 owner 邮箱筛选）
+    if (req.method === 'GET' && p === '/api/files') {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      let files;
+      if (isSuper && u.searchParams.get('scope') === 'all') files = await db.listAllFiles();
+      else files = await db.listFilesForUser(idn.userId);
+      // 超管可进一步按人员筛选（owner 邮箱模糊匹配）
+      const owner = (u.searchParams.get('owner') || '').trim().toLowerCase();
+      if (isSuper && owner) files = files.filter(f => (f.owner_email || '').toLowerCase().includes(owner));
+      const list = files.map(f => ({
+        fileId: f.id, name: f.name, size: Number(f.size) || 0, kind: f.kind,
+        shareCount: Number(f.share_count) || 0, shareId: f.share_id || null, shareName: f.share_name || '',
+        ownerEmail: isSuper ? (f.owner_email || '（孤儿/未分享）') : undefined,
+        createdAt: Number(f.createdAt)
+      }));
+      return sendJson(res, 200, { files: list, isSuper });
+    }
+
+    // 替换文件：保持 file_id 不变 → 分享链接永远指向最新文件；原文件字节仅作备份不删（可回滚）
+    if (req.method === 'POST' && /^\/api\/files\/[^\/]+\/replace$/.test(p)) {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const fileId = p.split('/')[3];
+      const old = await db.getFile(fileId);
+      if (!old) return sendJson(res, 404, { error: 'file_not_found' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const shares = await db.listSharesByFile(fileId);
+      if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) return sendJson(res, 403, { error: 'no_auth', message: '无权操作该文件' });
+      const buf = await readBody(req);
+      if (!buf.length) return sendJson(res, 400, { error: 'empty' });
+      const name = u.searchParams.get('name') ? decodeURIComponent(u.searchParams.get('name')) : old.original_name;
+      const mime = u.searchParams.get('mime') || old.mime || 'application/octet-stream';
+      const ext = path.extname(name).toLowerCase();
+      let kind = 'download';
+      if (mime === 'application/pdf' || ext === '.pdf') kind = 'pdf';
+      else if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext) || mime.startsWith('image/')) kind = 'image';
+      else if (ext === '.docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') kind = 'docx';
+      else if (preview.SOURCE_EXTS.includes(ext)) kind = 'source';
+      const newStored = uuid() + ext;
+      await storage.save(newStored, buf, mime);
+      let previewPath = old.preview_path;
+      if (kind === 'source') {
+        try {
+          const pv = await preview.generatePreview(ext, mime, buf);
+          if (pv.ok) { const pvName = uuid() + '_preview.png'; await storage.save(pvName, pv.buffer, 'image/png'); previewPath = pvName; }
+        } catch (e) { console.warn('[preview] 替换预览生成失败：', e.message); }
+      }
+      await db.replaceFileById(fileId, { storedName: newStored, mime, size: buf.length, kind, previewPath, originalName: name });
+      // 删除旧存储字节（替换完成，保留 file_id；如需回滚可在存储层保留版本）
+      try { await storage.delete(old.stored_name); } catch (e) {}
+      if (old.preview_path && old.preview_path !== previewPath) { try { await storage.delete(old.preview_path); } catch (e) {} }
+      // 同步更新引用该文件的分享的 kind（内容类型可能变化）
+      for (const sh of shares) { await db.run('UPDATE shares SET kind=?, updated_at=? WHERE id=?', [kind, nowMs(), sh.id]); }
+      await db.recordAudit(idn.userId, 'replace_file', fileId, `name=${name};shares=${shares.length}`);
+      return sendJson(res, 200, { fileId, kind, name, shareCount: shares.length, message: '文件已更新，原有分享链接保持不变' });
+    }
+
+    // 删除文件：仅当无分享引用时允许（被引用须先处理分享）
+    if (req.method === 'DELETE' && /^\/api\/files\/[^\/]+$/.test(p)) {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const fileId = p.split('/')[3];
+      const old = await db.getFile(fileId);
+      if (!old) return sendJson(res, 404, { error: 'file_not_found' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const shares = await db.listSharesByFile(fileId);
+      if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) return sendJson(res, 403, { error: 'no_auth', message: '无权操作该文件' });
+      // 仅当存在“生效中”的分享引用时才拦截；已销毁/已失效的分享不影响删除（一并清理）
+      const active = shares.filter(s => s.status === 'active');
+      if (active.length) return sendJson(res, 409, { error: 'file_in_use', message: '该文件仍被以下生效中的分享引用，请先处理分享：', shares: active.map(s => ({ id: s.id, name: s.name })) });
+      for (const sh of shares) { await db.deleteShareRow(sh.id); }
+      try { await storage.delete(old.stored_name); } catch (e) {}
+      if (old.preview_path) { try { await storage.delete(old.preview_path); } catch (e) {} }
+      await db.deleteFileRow(fileId);
+      await db.recordAudit(idn.userId, 'delete_file', fileId, `name=${old.original_name};shares=${shares.length}`);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 数据概览（超管全局；普通登录用户仅本人数据）
+    if (req.method === 'GET' && p === '/api/dashboard') {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const totals = await db.dashboardTotals(idn.userId, isSuper);
+      const topShares = await db.dashboardTopShares(idn.userId, isSuper);
+      const recent = await db.dashboardRecentViewers(idn.userId, isSuper);
+      return sendJson(res, 200, {
+        isSuper, scope: isSuper ? 'global' : 'mine',
+        totals: {
+          fileCount: totals.fileCount, shareCount: totals.shareCount,
+          totalOpens: totals.totalOpens, totalViewers: totals.totalViewers
+        },
+        topShares: topShares.map(s => ({ shareId: s.id, name: s.name, ownerEmail: s.owner_email || '(匿名)', opens: Number(s.opens) || 0, viewers: Number(s.viewers) || 0 })),
+        recentViewers: recent.map(v => ({
+          viewerToken: v.viewer_token, shareName: v.share_name || '', ownerEmail: v.owner_email || '',
+          events: Number(v.events) || 0, lastAt: Number(v.last_at),
+          loc: [v.country, v.region, v.city].filter(Boolean).join('·'), ip: v.ip || '',
+          device: [v.device, v.os].filter(Boolean).join('/'), browser: v.browser || ''
+        }))
+      });
+    }
+
     // 获取分享元数据
     if (req.method === 'GET' && p.startsWith('/api/share/')) {
       const shareId = p.split('/')[3];
       const share = await db.getShareMeta(shareId);
       if (!share) return sendJson(res, 404, { error: 'not_found' });
       const requiresCode = !!share.access_code;
+      let extraObj = {};
+      try { extraObj = share.extra ? JSON.parse(share.extra) : {}; } catch (e) { extraObj = {}; }
       return sendJson(res, 200, {
         shareId: share.id, name: share.name, kind: share.kind, status: share.status,
         preview: !!share.preview_path,
@@ -505,7 +700,8 @@ const server = http.createServer(async (req, res) => {
         restrictions: {
           copy: !!share.disable_copy, print: !!share.disable_print,
           download: !!share.disable_download, screenshot: !!share.disable_screenshot
-        }
+        },
+        extra: extraObj
       });
     }
 
@@ -599,7 +795,7 @@ const server = http.createServer(async (req, res) => {
       if (!idn || idn.type !== 'user') return sendJson(res, 403, { error: 'no_auth', message: '请先登录' });
       const shares = await db.listMySharesById(idn.userId);
       const list = shares.map(s => ({
-        shareId: s.id, name: s.name, kind: s.kind, status: s.status,
+        shareId: s.id, fileId: s.file_id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers,
         maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
         expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
@@ -726,7 +922,7 @@ const server = http.createServer(async (req, res) => {
       if (!sup) return sendJson(res, 403, { error: 'no_super' });
       const shares = await db.listAllShares();
       const list = shares.map(s => ({
-        shareId: s.id, name: s.name, kind: s.kind, status: s.status,
+        shareId: s.id, fileId: s.file_id, name: s.name, kind: s.kind, status: s.status,
         ownerEmail: s.owner_email || '(匿名)',
         opens: s.opens, viewers: s.viewers,
         maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
@@ -746,12 +942,31 @@ const server = http.createServer(async (req, res) => {
         orgId: x.org_id, createdAt: Number(x.created_at), shareCount: Number(x.share_count) || 0, bytes: Number(x.bytes) || 0
       })) });
     }
-    // 操作审计日志
+    // 操作审计日志（支持筛选：动作 / 操作人 / 对象类型 / 时间范围 / 关键词）
     if (req.method === 'GET' && p === '/api/super/audit') {
       const sup = await requireSuper(u.searchParams.get('userToken'));
       if (!sup) return sendJson(res, 403, { error: 'no_super' });
-      const logs = await db.listAudit(200);
-      return sendJson(res, 200, { logs: logs.map(l => ({ actorId: l.actor_id, action: l.action, target: l.target, detail: l.detail, createdAt: Number(l.created_at) })) });
+      const action = (u.searchParams.get('action') || '').trim();
+      const actor = (u.searchParams.get('actor') || '').trim().toLowerCase();
+      const targetType = (u.searchParams.get('targetType') || '').trim();
+      const q = (u.searchParams.get('q') || '').trim().toLowerCase();
+      const from = Number(u.searchParams.get('from') || 0);
+      const to = Number(u.searchParams.get('to') || 0);
+      let logs = await db.listAudit(1000);
+      if (action) logs = logs.filter(l => (l.action || '') === action);
+      if (actor) logs = logs.filter(l => ((l.actor_email || '') + ' ' + (l.actor_real_name || '')).toLowerCase().includes(actor));
+      if (targetType === 'user') logs = logs.filter(l => /_user$/.test(l.action || ''));
+      else if (targetType === 'org') logs = logs.filter(l => (l.target || '') === 'org');
+      else if (targetType === 'storage') logs = logs.filter(l => (l.target || '') === 'storage');
+      else if (targetType === 'share') logs = logs.filter(l => !/_user$/.test(l.action || '') && (l.target || '') !== 'org' && (l.target || '') !== 'storage');
+      if (from) logs = logs.filter(l => Number(l.created_at) >= from);
+      if (to) logs = logs.filter(l => Number(l.created_at) <= to);
+      if (q) logs = logs.filter(l => ((l.detail || '') + ' ' + (l.action || '') + ' ' + (l.actor_real_name || '') + ' ' + (l.actor_email || '')).toLowerCase().includes(q));
+      logs = logs.slice(0, 200);
+      return sendJson(res, 200, { logs: logs.map(l => ({
+        actorId: l.actor_id, action: l.action, target: l.target, detail: l.detail, createdAt: Number(l.created_at),
+        actorEmail: l.actor_email || '', actorRealName: l.actor_real_name || ''
+      })) });
     }
     // 清理孤儿文件（已销毁/未分享文件），释放存储
     if (req.method === 'POST' && p === '/api/super/cleanup') {
