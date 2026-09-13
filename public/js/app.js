@@ -40,11 +40,21 @@ async function initUserArea() {
 initUserArea();
 
 const drop = $('#drop'), fileInput = $('#file');
-drop.addEventListener('click', () => fileInput.click());
+function isLoggedIn() { return !!localStorage.getItem('userToken'); }
+function requireLogin() {
+  if (isLoggedIn()) return true;
+  if (window.openLoginModal) window.openLoginModal();
+  return false;
+}
+drop.addEventListener('click', () => { if (!requireLogin()) return; fileInput.click(); });
 drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('hot'); });
 drop.addEventListener('dragleave', () => drop.classList.remove('hot'));
-drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('hot'); if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
-fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('hot'); if (!requireLogin()) return; if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => {
+  if (!fileInput.files[0]) return;
+  if (!requireLogin()) { fileInput.value = ''; return; }
+  setFile(fileInput.files[0]);
+});
 
 function setFile(f) {
   selectedFile = f;
@@ -59,12 +69,13 @@ $('#fiClear').addEventListener('click', (e) => { e.preventDefault(); selectedFil
 
 async function uploadAndShare() {
   if (!selectedFile) return toast('请先选择文件');
+  if (!requireLogin()) return;
   const btn = $('#shareBtn'); btn.disabled = true; btn.textContent = '正在上传并加密…';
   const userToken = localStorage.getItem('userToken');
   try {
-    // 1) 上传原始字节
+    // 1) 上传原始字节（必须登录）
     const buf = await selectedFile.arrayBuffer();
-    const up = await fetch('/api/upload?name=' + encodeURIComponent(selectedFile.name) + '&mime=' + encodeURIComponent(selectedFile.type || 'application/octet-stream'), {
+    const up = await fetch('/api/upload?userToken=' + encodeURIComponent(userToken || '') + '&name=' + encodeURIComponent(selectedFile.name) + '&mime=' + encodeURIComponent(selectedFile.type || 'application/octet-stream'), {
       method: 'POST', body: buf
     });
     const upRes = await up.json().catch(() => ({}));
@@ -95,15 +106,15 @@ async function uploadAndShare() {
     $('#qrImg').src = shRes.qr;
     $('#linkInput').value = location.origin + '/viewer.html?share=' + shRes.shareId;
     $('#openViewer').href = $('#linkInput').value;
-    // 管理权（ownerToken）不再写入 URL，避免“分享链接/管理链接”被误发后泄露后台管理权限。
-    // 已登录 → 走账号；匿名创建者 → 本机 localStorage 仍可管理；两者皆无 → 点击弹登录框。
-    $('#openAdmin').href = '/admin.html';
-    $('#openAdmin').onclick = (e) => {
-      const ut = localStorage.getItem('userToken');
-      const ot = localStorage.getItem('ownerToken');
-      if (!ut && !ot && window.openLoginModal) { e.preventDefault(); window.openLoginModal(); }
-    };
-    localStorage.setItem('ownerToken', shRes.ownerToken);
+    // 后台界面必须登录后才能进入；匿名用户仅可创建/预览/复制分享链接，不再显示「进入管理后台」。
+    // ownerToken 不再写入 localStorage，避免本机被他人拿到管理权。
+    if (userToken) {
+      $('#openAdmin').style.display = '';
+      $('#openAdmin').href = '/admin.html';
+      $('#openAdmin').onclick = null;
+    } else {
+      $('#openAdmin').style.display = 'none';
+    }
     $('#result').classList.add('show');
   } catch (e) {
     toast('失败：' + e.message);
@@ -113,3 +124,9 @@ async function uploadAndShare() {
 }
 $('#shareBtn').addEventListener('click', uploadAndShare);
 $('#copyLink').addEventListener('click', () => { navigator.clipboard.writeText($('#linkInput').value); toast('链接已复制'); });
+
+// 成功弹窗：关闭按钮、点击遮罩、ESC 均可关闭
+function closeResult() { $('#result').classList.remove('show'); }
+$('#closeResult').addEventListener('click', closeResult);
+$('#result').addEventListener('click', (e) => { if (e.target === $('#result')) closeResult(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#result').classList.contains('show')) closeResult(); });

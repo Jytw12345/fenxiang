@@ -82,6 +82,8 @@ input:focus,select:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.5);display:none;align-items:center;justify-content:center;padding:20px;z-index:50;}
 .modal.show{display:flex;}
 .modal .box{background:#fff;border-radius:16px;padding:26px;max-width:460px;width:100%;text-align:center;box-shadow:0 20px 50px rgba(15,23,42,.25);}
+.modal-close{position:absolute;top:12px;right:16px;background:none;border:none;font-size:24px;color:var(--muted);cursor:pointer;line-height:1;padding:0 4px;}
+.modal-close:hover{color:var(--text);}
 .qr{width:200px;height:200px;margin:8px auto 14px;border:1px solid var(--line);border-radius:10px;}
 .linkbox{display:flex;gap:8px;margin:8px 0 16px;}
 .linkbox input{font-size:13px;}

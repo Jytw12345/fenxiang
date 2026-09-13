@@ -12,6 +12,7 @@
     document.getElementById('loginSubmit').textContent = loginMode === 'login' ? '登录' : '注册';
     document.getElementById('loginToggle').textContent = loginMode === 'login' ? '没有账号？去注册' : '已有账号？去登录';
     document.getElementById('loginInviteField').style.display = loginMode === 'register' ? 'block' : 'none';
+    document.getElementById('loginRealNameField').style.display = loginMode === 'register' ? 'block' : 'none';
     msgEl().textContent = '';
   }
   function open() {
@@ -20,6 +21,7 @@
     document.getElementById('loginEmail').value = '';
     document.getElementById('loginPw').value = '';
     document.getElementById('loginInvite').value = '';
+    const rnEl = document.getElementById('loginRealName'); if (rnEl) rnEl.value = '';
     modal.classList.add('show');
     setTimeout(() => { const e = document.getElementById('loginEmail'); if (e) e.focus(); }, 50);
   }
@@ -40,9 +42,11 @@
   async function submit() {
     const email = document.getElementById('loginEmail').value.trim();
     const pw = document.getElementById('loginPw').value;
+    const realName = (document.getElementById('loginRealName').value || '').trim();
     const msg = msgEl();
     if (!email || !pw) { msg.textContent = '请填写邮箱和密码'; return; }
     if (loginMode === 'register' && pw.length < 8) { msg.textContent = '密码至少 8 位'; return; }
+    if (loginMode === 'register' && !realName) { msg.textContent = '请填写真实姓名'; return; }
     const btn = document.getElementById('loginSubmit');
     btn.disabled = true;
     try {
@@ -60,7 +64,7 @@
       const r = await fetch('/api/auth/' + loginMode, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email, password: pw,
+          email, password: pw, realName,
           inviteCode: loginMode === 'register' ? (document.getElementById('loginInvite').value || '').trim() : ''
         })
       });

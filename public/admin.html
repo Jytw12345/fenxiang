@@ -35,6 +35,7 @@
     <button class="tab" data-tab="org">全店分享</button>
     <button class="tab" data-tab="members">成员</button>
     <button class="tab" data-tab="invite">邀请码</button>
+    <button class="tab" data-tab="allshares" id="tabAllShares" style="display:none">全部分享</button>
     <button class="tab" data-tab="stats" id="tabStats" style="display:none">存储用量</button>
     <button class="tab" data-tab="users" id="tabUsers" style="display:none">用户管理</button>
     <button class="tab" data-tab="audit" id="tabAudit" style="display:none">操作日志</button>
@@ -53,6 +54,7 @@
   </div>
 
   <div id="superPanel" style="display:none">
+    <div id="superAllShares" style="display:none"></div>
     <div id="superStats" style="display:none"></div>
     <div id="superUsers" style="display:none"></div>
     <div id="superAudit" style="display:none"></div>
@@ -100,6 +102,10 @@
     <div class="field">
       <label>密码</label>
       <input id="loginPw" type="password" placeholder="至少 8 位" />
+    </div>
+    <div class="field" id="loginRealNameField" style="display:none">
+      <label>真实姓名（必填）</label>
+      <input id="loginRealName" placeholder="请输入真实姓名" />
     </div>
     <div class="field" id="loginInviteField" style="display:none">
       <label>邀请码（选填，加入公司组织）</label>

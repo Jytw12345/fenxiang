@@ -24,9 +24,9 @@ function isReady() { return !!drv; }
 function driverType() { return drv ? drv.type : null; }
 
 // ---------- 用户与令牌 ----------
-async function createUser({ id, email, salt, hash, openid = null, createdAt, orgId = null, role = 'member', supabaseId = null, isSuper = 0 }) {
-  await drv.run('INSERT INTO users (id,email,password_hash,salt,wechat_openid,created_at,org_id,role,supabase_id,is_super,disabled) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [id, email, hash, salt, openid, createdAt, orgId || '', role, supabaseId || '', isSuper ? 1 : 0, 0]);
+async function createUser({ id, email, salt, hash, openid = null, createdAt, orgId = null, role = 'member', supabaseId = null, isSuper = 0, realName = null }) {
+  await drv.run('INSERT INTO users (id,email,password_hash,salt,wechat_openid,created_at,org_id,role,supabase_id,is_super,disabled,real_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+    [id, email, hash, salt, openid, createdAt, orgId || '', role, supabaseId || '', isSuper ? 1 : 0, 0, realName || '']);
 }
 async function countUsers() {
   const row = await drv.get('SELECT COUNT(*) AS c FROM users');
@@ -49,7 +49,7 @@ async function getUserBySupabaseId(sub) {
   return drv.get('SELECT * FROM users WHERE supabase_id=?', [sub]) || null;
 }
 // 确保 Supabase 用户存在（首登自动建行 + 归属组织）。返回用户行或 { error }。
-async function ensureUser({ sub, email, inviteCode }) {
+async function ensureUser({ sub, email, inviteCode, realName = null }) {
   const exist = await getUserBySupabaseId(sub);
   if (exist) {
     // 已存在用户：若邮箱在超级管理员名单内且尚未标记，则同步提权。
@@ -84,7 +84,7 @@ async function ensureUser({ sub, email, inviteCode }) {
   }
   const id = uuid();
   const isSuper = (config.SUPER_ADMIN_EMAILS.includes(String(email || '').toLowerCase())) ? 1 : 0;
-  await createUser({ id, email: email || '', salt: '', hash: '', openid: null, createdAt: Date.now(), orgId, role, supabaseId: sub, isSuper });
+  await createUser({ id, email: email || '', salt: '', hash: '', openid: null, createdAt: Date.now(), orgId, role, supabaseId: sub, isSuper, realName });
   return getUser(id);
 }
 async function updateUserOrg({ userId, orgId, role }) {
@@ -295,7 +295,7 @@ async function listAllShares() {
     ORDER BY s.created_at DESC`);
 }
 async function listAllUsers() {
-  return drv.all(`SELECT u.id, u.email, u.role, u.is_super, u.disabled, u.created_at, u.org_id,
+  return drv.all(`SELECT u.id, u.email, u.real_name, u.role, u.is_super, u.disabled, u.created_at, u.org_id,
       (SELECT COUNT(*) FROM shares s WHERE s.owner_id=u.id) AS share_count,
       (SELECT COALESCE(SUM(f.size),0) FROM shares s JOIN files f ON s.file_id=f.id WHERE s.owner_id=u.id) AS bytes
     FROM users u ORDER BY bytes DESC, u.created_at ASC`);

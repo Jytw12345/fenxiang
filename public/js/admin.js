@@ -3,20 +3,12 @@ const $ = (s) => document.querySelector(s);
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); };
 
 let token = localStorage.getItem('userToken');
-let isOwnerToken = false;
-// 安全：管理权（ownerToken）不再从 URL 读取，防止分享链接泄露后台管理权限。
-// 匿名创建者仅能在本机通过 localStorage 管理（下方回退）；换设备请登录归集到账号。
-if (!token) { token = localStorage.getItem('ownerToken'); if (token) isOwnerToken = true; }
-
+// 安全：后台界面必须登录后才能进入。不再使用 ownerToken（匿名创建者无法进入管理后台）。
 const userArea = document.getElementById('userArea');
 function logout() { localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); location.href = '/'; }
 function showLogin() {
   userArea.innerHTML = `<a href="#" id="loginLink">登录 / 注册</a>`;
   document.getElementById('loginLink').onclick = (e) => { e.preventDefault(); if (window.openLoginModal) window.openLoginModal(); };
-}
-function showVisitor() {
-  userArea.innerHTML = `<span>访客管理模式</span> · <a href="#" id="loginLink2">登录归集到我的分享</a>`;
-  document.getElementById('loginLink2').onclick = (e) => { e.preventDefault(); if (window.openLoginModal) window.openLoginModal(); };
 }
 function showUser(email) {
   const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -26,8 +18,7 @@ function showUser(email) {
 window.afterLogin = showUser; // 供 login-modal.js 登录成功后刷新右上角
 async function initUserArea() {
   const userToken = localStorage.getItem('userToken');
-  // 先显示默认入口，避免异步校验期间右上角空白
-  if (isOwnerToken) showVisitor(); else showLogin();
+  showLogin();
   if (!userToken) return;
   try {
     const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(userToken), { cache: 'no-store' });
@@ -39,13 +30,13 @@ async function initUserArea() {
     // 令牌无效：清除并回到登录入口（不跳转、不重载，避免刷新死循环）
     localStorage.removeItem('userToken');
     localStorage.removeItem('userEmail');
-    if (isOwnerToken) showVisitor(); else showLogin();
+    showLogin();
   }
 }
 initUserArea();
 
 if (!token) {
-  document.getElementById('list').innerHTML = '<div class="empty">请先<a href="/auth.html">登录</a>，或打开创建分享时的「管理后台」链接。</div>';
+  document.getElementById('list').innerHTML = '<div class="empty">请先<a href="/auth.html">登录</a>后再进入管理后台。</div>';
 }
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -177,27 +168,36 @@ async function initOrg() {
   let me;
   try { const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(orgToken)); me = await r.json(); }
   catch (e) { return; }
-  if (!me || me.role !== 'admin') return;
+  if (!me) return;
 
   const tabs = $('#tabs');
   const list = $('#list');
   const orgPanel = $('#orgPanel');
   const superPanel = $('#superPanel');
   const sub = { org: $('#orgShares'), members: $('#orgMembers'), invite: $('#orgInvite') };
-  // 超级管理员额外 tab
-  if (me.isSuper) { $('#tabStats').style.display = ''; $('#tabUsers').style.display = ''; $('#tabAudit').style.display = ''; }
+  // 所有登录用户都能看到「我的分享」
   tabs.style.display = 'flex';
+  // 店长才显示组织管理 tab；普通成员隐藏
+  if (me.role === 'admin') {
+    document.querySelectorAll('.tab[data-tab="org"], .tab[data-tab="members"], .tab[data-tab="invite"]').forEach(el => el.style.display = '');
+  } else {
+    document.querySelectorAll('.tab[data-tab="org"], .tab[data-tab="members"], .tab[data-tab="invite"]').forEach(el => el.style.display = 'none');
+  }
+  // 超级管理员额外 tab
+  if (me.isSuper) { $('#tabAllShares').style.display = ''; $('#tabStats').style.display = ''; $('#tabUsers').style.display = ''; $('#tabAudit').style.display = ''; }
   document.querySelectorAll('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       const t = btn.dataset.tab;
-      const superTabs = ['stats', 'users', 'audit'];
+      const superTabs = ['allshares', 'stats', 'users', 'audit'];
       if (superTabs.includes(t)) {
         list.style.display = 'none'; orgPanel.style.display = 'none'; superPanel.style.display = 'block';
+        $('#superAllShares').style.display = t === 'allshares' ? 'block' : 'none';
         $('#superStats').style.display = t === 'stats' ? 'block' : 'none';
         $('#superUsers').style.display = t === 'users' ? 'block' : 'none';
         $('#superAudit').style.display = t === 'audit' ? 'block' : 'none';
+        if (t === 'allshares') loadAllShares();
         if (t === 'stats') loadStats();
         if (t === 'users') loadUsers();
         if (t === 'audit') loadAudit();
@@ -258,6 +258,12 @@ async function loadOrgShares() {
   const r = await fetch('/api/org/shares?userToken=' + encodeURIComponent(orgToken));
   const d = await r.json();
   renderShares($('#orgShares'), d.shares, true);
+}
+async function loadAllShares() {
+  const r = await fetch('/api/super/shares?userToken=' + encodeURIComponent(orgToken));
+  const d = await r.json();
+  if (d.error) { $('#superAllShares').innerHTML = '<div class="empty">无权访问</div>'; return; }
+  renderShares($('#superAllShares'), d.shares, true);
 }
 async function loadMembers() {
   const r = await fetch('/api/org/members?userToken=' + encodeURIComponent(orgToken));

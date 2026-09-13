@@ -157,12 +157,24 @@ async function manageShare(token, shareId) {
   }
   return s.owner_token === o.ownerToken ? s : null;
 }
-// 店长/超管均可管理：店长按组织范围，超级管理员可管理任意分享（含无归属分享）
+// 店长/超管均可管理：店长按组织范围，超级管理员可管理任意分享（含无归属分享）。
+// 后台界面必须登录后才能操作，不再接受匿名 ownerToken。
 async function resolveShareForAdmin(token, shareId) {
-  const s = await manageShare(token, shareId);
-  if (s) return s;
+  const idn = await resolveIdentity(token);
+  if (!idn || idn.type !== 'user') return null;
+  const s = await db.getShare(shareId);
+  if (!s) return null;
+  // 自己创建的分享
+  if (s.owner_id === idn.userId) return s;
+  // 店长管理本组织成员创建的分享
+  const u = await db.getUser(idn.userId);
+  if (u && u.role === 'admin' && u.org_id && s.owner_id) {
+    const owner = await db.getUser(s.owner_id);
+    if (owner && owner.org_id === u.org_id) return s;
+  }
+  // 超级管理员可管理任意分享
   const sup = await requireSuper(token);
-  if (sup) return await db.getShare(shareId);
+  if (sup) return s;
   return null;
 }
 // 解析新用户应归属的组织与角色
@@ -285,12 +297,14 @@ const server = http.createServer(async (req, res) => {
       const email = String(b.email || '').trim().toLowerCase();
       const pw = String(b.password || '');
       const inviteCode = String(b.inviteCode || '').trim();
+      const realName = String(b.realName || '').trim();
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return sendJson(res, 400, { error: 'invalid_email' });
       const pwErr = validatePassword(pw);
       if (pwErr) return sendJson(res, 400, { error: 'weak_password', message: pwErr });
+      if (!realName) return sendJson(res, 400, { error: 'real_name_required', message: '请填写真实姓名' });
       if (await db.findUserByEmail(email)) return sendJson(res, 409, { error: 'email_exists', message: '该邮箱已注册' });
-      // 超级管理员：首个注册用户，或 SUPER_ADMIN_EMAILS 名单内邮箱（不受注册域名限制）
-      const isSuper = (await db.countUsers()) === 0 || config.SUPER_ADMIN_EMAILS.includes(email);
+      // 超级管理员：仅由 SUPER_ADMIN_EMAILS 名单指定（不再把首个注册用户自动设为超管）
+      const isSuper = config.SUPER_ADMIN_EMAILS.includes(email);
       let orgRes;
       if (isSuper) {
         const domain = (String(email).split('@')[1] || '').toLowerCase();
@@ -303,7 +317,7 @@ const server = http.createServer(async (req, res) => {
       }
       const { salt, hash } = hashPassword(pw);
       const uid = uuid();
-      await db.createUser({ id: uid, email, salt, hash, openid: null, createdAt: nowMs(), orgId: orgRes.orgId, role: orgRes.role, isSuper });
+      await db.createUser({ id: uid, email, salt, hash, openid: null, createdAt: nowMs(), orgId: orgRes.orgId, role: orgRes.role, isSuper, realName });
       const token = uuid();
       await db.createUserToken({ token, userId: uid, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
       return sendJson(res, 200, { userToken: token, email, role: orgRes.role, isSuper });
@@ -315,9 +329,16 @@ const server = http.createServer(async (req, res) => {
       const user = await db.findUserByEmail(email);
       if (!user || !verifyPassword(pw, user.salt, user.password_hash)) return sendJson(res, 401, { error: 'bad_creds', message: '邮箱或密码错误' });
       if (user.disabled) return sendJson(res, 403, { error: 'disabled', message: '该账号已被禁用，请联系管理员' });
+      // 超级管理员名单同步提权：已存在账号若邮箱在 SUPER_ADMIN_EMAILS 内且尚未标记，则升级为超管。
+      // 与 Supabase ensureUser 路径一致，避免老账号在新版上线后永远无法成为超管（影响"用户管理"面板可见性）。
+      let isSuper = !!Number(user.is_super);
+      if (config.SUPER_ADMIN_EMAILS.includes(email) && !user.is_super) {
+        await db.setUserSuper(user.id, 1);
+        isSuper = true;
+      }
       const token = uuid();
       await db.createUserToken({ token, userId: user.id, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
-      return sendJson(res, 200, { userToken: token, email: user.email });
+      return sendJson(res, 200, { userToken: token, email: user.email, realName: user.real_name || '', isSuper });
     }
     if (req.method === 'GET' && p === '/api/auth/me') {
       const token = u.searchParams.get('userToken');
@@ -327,7 +348,7 @@ const server = http.createServer(async (req, res) => {
       const email = user ? user.email : '微信用户';
       let orgName = '';
       if (user && user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
-      return sendJson(res, 200, { email, role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false });
+      return sendJson(res, 200, { email, realName: user ? (user.real_name || '') : '', role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false });
     }
 
     // Supabase 用户首登：确保本地用户行 + 归属组织（邀请码 / 域名 / 开放多租户）
@@ -408,8 +429,11 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: false, status: ws.status });
     }
 
-    // 上传文件
+    // 上传文件（必须登录，匿名用户不允许上传/分享）
     if (req.method === 'POST' && p === '/api/upload') {
+      const uploadToken = u.searchParams.get('userToken');
+      const uploadIdn = await resolveIdentity(uploadToken);
+      if (!uploadIdn || uploadIdn.type !== 'user') return sendJson(res, 401, { error: 'no_auth', message: '请先登录后再上传文件' });
       const buf = await readBody(req);
       if (!buf.length) return sendJson(res, 400, { error: 'empty' });
       const name = u.searchParams.get('name') ? decodeURIComponent(u.searchParams.get('name')) : 'file';
@@ -441,19 +465,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { fileId, name, kind, hasPreview: !!previewPath, size: buf.length });
     }
 
-    // 创建分享
+    // 创建分享（必须登录，禁止匿名分享）
     if (req.method === 'POST' && p === '/api/share') {
       const body = JSON.parse(await readBody(req, 1 << 20));
+      if (!body.userToken) return sendJson(res, 401, { error: 'no_auth', message: '请先登录后再创建分享' });
+      const idn = await resolveIdentity(body.userToken);
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth', message: '登录已过期，请重新登录' });
       const file = await db.getFile(body.fileId);
       if (!file) return sendJson(res, 404, { error: 'file_not_found' });
       const shareId = uuid().slice(0, 12);
       const ownerToken = uuid();
       const s = body.settings || {};
-      let ownerId = null;
-      if (body.userToken) {
-        const idn = await resolveIdentity(body.userToken);
-        if (idn && idn.type === 'user') ownerId = idn.userId;
-      }
+      const ownerId = idn.userId;
       const am = (s.authMode === 'approve' || s.authMode === 'wechat') ? s.authMode : 'open';
       await db.createShare({
         shareId, fileId: file.id, ownerId, ownerToken, name: s.name || file.original_name, kind: file.kind,
@@ -569,13 +592,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // 管理后台：列出我的分享
+    // 管理后台：列出我的分享（必须登录，不再接受匿名 ownerToken）
     if (req.method === 'GET' && p.startsWith('/api/admin/') && p.split('/').length === 4) {
       const token = p.split('/')[3];
-      const o = await resolveOwner(token);
-      let shares;
-      if (o.type === 'user') shares = await db.listMySharesById(o.userId);
-      else shares = await db.listMySharesByOwnerToken(o.ownerToken);
+      const idn = await resolveIdentity(token);
+      if (!idn || idn.type !== 'user') return sendJson(res, 403, { error: 'no_auth', message: '请先登录' });
+      const shares = await db.listMySharesById(idn.userId);
       const list = shares.map(s => ({
         shareId: s.id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers,
@@ -698,13 +720,29 @@ const server = http.createServer(async (req, res) => {
         topShares: st.topShares.map(x => ({ id: x.id, name: x.name, ownerEmail: x.owner_email || '(匿名)', size: Number(x.file_size) || 0 }))
       });
     }
+    // 全部分享（超管可管理任意分享）
+    if (req.method === 'GET' && p === '/api/super/shares') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const shares = await db.listAllShares();
+      const list = shares.map(s => ({
+        shareId: s.id, name: s.name, kind: s.kind, status: s.status,
+        ownerEmail: s.owner_email || '(匿名)',
+        opens: s.opens, viewers: s.viewers,
+        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
+        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
+        restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
+        createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
+      }));
+      return sendJson(res, 200, { shares: list });
+    }
     // 用户列表
     if (req.method === 'GET' && p === '/api/super/users') {
       const sup = await requireSuper(u.searchParams.get('userToken'));
       if (!sup) return sendJson(res, 403, { error: 'no_super' });
       const users = await db.listAllUsers();
       return sendJson(res, 200, { users: users.map(x => ({
-        id: x.id, email: x.email, role: x.role, isSuper: !!Number(x.is_super), disabled: !!Number(x.disabled),
+        id: x.id, email: x.email, realName: x.real_name || '', role: x.role, isSuper: !!Number(x.is_super), disabled: !!Number(x.disabled),
         orgId: x.org_id, createdAt: Number(x.created_at), shareCount: Number(x.share_count) || 0, bytes: Number(x.bytes) || 0
       })) });
     }

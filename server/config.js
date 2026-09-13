@@ -2,6 +2,23 @@
 // 集中管理环境变量配置（部署到自有服务器时通过 .env 或系统环境变量注入）
 const path = require('path');
 
+// 零依赖读取项目根目录 .env（若存在），仅补充尚未设置的变量，不覆盖已设置的环境变量。
+// 这样本地 `node server/index.js` 也能直接吃 .env，无需手动 export。
+(function loadDotEnv() {
+  try {
+    const fs = require('fs');
+    const envPath = path.join(__dirname, '..', '.env');
+    if (!fs.existsSync(envPath)) return;
+    const txt = fs.readFileSync(envPath, 'utf8');
+    for (const line of txt.split('\n')) {
+      const m = line.match(/^\s*([\w.]+)\s*=\s*(.*)\s*$/);
+      if (!m) continue;
+      const k = m[1], v = m[2].replace(/^["']|["']$/g, '');
+      if (process.env[k] === undefined) process.env[k] = v;
+    }
+  } catch (e) { /* .env 可选，缺失不影响运行 */ }
+})();
+
 function str(v, def) { return (v === undefined || v === null || v === '') ? def : String(v); }
 
 module.exports = {

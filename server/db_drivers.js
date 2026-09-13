@@ -15,7 +15,7 @@ function toPg(sql, params) {
 // 各方言建表语句（logs.id 统一为 TEXT uuid，避免自增方言差异）
 const SCHEMA = {
   sqlite: [
-    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at INTEGER, org_id TEXT DEFAULT '', role TEXT DEFAULT 'member', supabase_id TEXT DEFAULT '', is_super INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0)`,
+    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at INTEGER, org_id TEXT DEFAULT '', role TEXT DEFAULT 'member', supabase_id TEXT DEFAULT '', is_super INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0, real_name TEXT DEFAULT '')`,
     `CREATE TABLE IF NOT EXISTS user_tokens (token TEXT PRIMARY KEY, user_id TEXT, created_at INTEGER, expires_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, original_name TEXT, stored_name TEXT, mime TEXT, size INTEGER, kind TEXT, preview_path TEXT DEFAULT NULL, created_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, file_id TEXT, owner_id TEXT, owner_token TEXT, name TEXT, kind TEXT, status TEXT DEFAULT 'active', max_viewers INTEGER DEFAULT 0, max_views INTEGER DEFAULT 0, duration_sec INTEGER DEFAULT 0, expires_at INTEGER, access_code TEXT, auth_mode TEXT DEFAULT 'open', watermark TEXT DEFAULT '', disable_copy INTEGER DEFAULT 1, disable_print INTEGER DEFAULT 1, disable_download INTEGER DEFAULT 1, disable_screenshot INTEGER DEFAULT 0, created_at INTEGER, updated_at INTEGER)`,
@@ -31,7 +31,7 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at INTEGER)`
   ],
   postgres: [
-    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at BIGINT, org_id TEXT DEFAULT '', role TEXT DEFAULT 'member', supabase_id TEXT DEFAULT '', is_super INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0)`,
+    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at BIGINT, org_id TEXT DEFAULT '', role TEXT DEFAULT 'member', supabase_id TEXT DEFAULT '', is_super INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0, real_name TEXT DEFAULT '')`,
     `CREATE TABLE IF NOT EXISTS user_tokens (token TEXT PRIMARY KEY, user_id TEXT, created_at BIGINT, expires_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, original_name TEXT, stored_name TEXT, mime TEXT, size BIGINT, kind TEXT, preview_path TEXT DEFAULT NULL, created_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, file_id TEXT, owner_id TEXT, owner_token TEXT, name TEXT, kind TEXT, status TEXT DEFAULT 'active', max_viewers INTEGER DEFAULT 0, max_views INTEGER DEFAULT 0, duration_sec INTEGER DEFAULT 0, expires_at BIGINT, access_code TEXT, auth_mode TEXT DEFAULT 'open', watermark TEXT DEFAULT '', disable_copy INTEGER DEFAULT 1, disable_print INTEGER DEFAULT 1, disable_download INTEGER DEFAULT 1, disable_screenshot INTEGER DEFAULT 0, created_at BIGINT, updated_at BIGINT)`,
@@ -47,7 +47,7 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at BIGINT)`
   ],
   mysql: [
-    `CREATE TABLE IF NOT EXISTS users (id VARCHAR(64) PRIMARY KEY, email VARCHAR(255) UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at BIGINT, org_id VARCHAR(64) DEFAULT '', role VARCHAR(16) DEFAULT 'member', supabase_id VARCHAR(64) DEFAULT '', is_super INT DEFAULT 0, disabled INT DEFAULT 0)`,
+    `CREATE TABLE IF NOT EXISTS users (id VARCHAR(64) PRIMARY KEY, email VARCHAR(255) UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at BIGINT, org_id VARCHAR(64) DEFAULT '', role VARCHAR(16) DEFAULT 'member', supabase_id VARCHAR(64) DEFAULT '', is_super INT DEFAULT 0, disabled INT DEFAULT 0, real_name TEXT DEFAULT '')`,
     `CREATE TABLE IF NOT EXISTS user_tokens (token VARCHAR(128) PRIMARY KEY, user_id VARCHAR(64), created_at BIGINT, expires_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS files (id VARCHAR(64) PRIMARY KEY, original_name TEXT, stored_name TEXT, mime TEXT, size BIGINT, kind TEXT, preview_path TEXT, created_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS shares (id VARCHAR(64) PRIMARY KEY, file_id VARCHAR(64), owner_id VARCHAR(64), owner_token VARCHAR(64), name TEXT, kind TEXT, status VARCHAR(16) DEFAULT 'active', max_viewers INT DEFAULT 0, max_views INT DEFAULT 0, duration_sec INT DEFAULT 0, expires_at BIGINT, access_code TEXT, auth_mode VARCHAR(16) DEFAULT 'open', watermark TEXT, disable_copy INT DEFAULT 1, disable_print INT DEFAULT 1, disable_download INT DEFAULT 1, disable_screenshot INT DEFAULT 0, created_at BIGINT, updated_at BIGINT)`,
@@ -157,6 +157,9 @@ async function createDriver() {
   // 兼容旧库：为 users 补齐 is_super / disabled 列（超级管理员体系）
   try { await drv.exec('ALTER TABLE users ADD COLUMN is_super INTEGER DEFAULT 0'); } catch (e) { /* 列已存在，忽略 */ }
   try { await drv.exec('ALTER TABLE users ADD COLUMN disabled INTEGER DEFAULT 0'); } catch (e) { /* 列已存在，忽略 */ }
+
+  // 兼容旧库：为 users 补齐 real_name 列（真实姓名，注册必填）
+  try { await drv.exec('ALTER TABLE users ADD COLUMN real_name TEXT DEFAULT \'\''); } catch (e) { /* 列已存在，忽略 */ }
 
   // 兼容旧库：为 logs 补齐查看者明细列（设备/系统/浏览器/地理位置）
   for (const col of ['device', 'os', 'browser', 'country', 'region', 'city']) {
