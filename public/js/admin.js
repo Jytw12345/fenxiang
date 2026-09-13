@@ -1209,7 +1209,11 @@ async function renderFileGrid(fetchFirst) {
     }
     try {
       const r = await fetch(url); const d = await r.json();
-      if (d.error) { grid.innerHTML = '<div class="empty">无权访问</div>'; return; }
+      if (d.error) {
+        const msg = String(d.message || d.error || '未知错误').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        grid.innerHTML = '<div class="empty">文件加载失败：' + msg + '</div>';
+        return;
+      }
       lastFiles = d.files || [];
     } catch (e) { grid.innerHTML = '<div class="empty">加载失败</div>'; return; }
   }
