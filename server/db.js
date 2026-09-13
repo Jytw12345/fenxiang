@@ -75,26 +75,13 @@ async function ensureUser({ sub, email, inviteCode, realName = null }) {
     const refreshed = await getUser(byEmail.id);
     return refreshed || byEmail;
   }
-  const domain = (String(email || '').split('@')[1] || '').toLowerCase();
+  // 门店(org)由超级管理员在后台统一创建与分配；Supabase 登录仅在携带有效邀请码时加入指定门店，
+  // 否则 org_id 为空（未入店），创建分享时会被网关拦截。不再按邮箱域名自动建组织。
   let orgId = null, role = 'member';
   if (inviteCode) {
     const inv = await getInvite(inviteCode);
     if (!inv) return { error: 'invalid_invite', message: '邀请码无效' };
     orgId = inv.org_id;
-  } else if (domain) {
-    const org = await getOrgByDomain(domain);
-    if (org) orgId = org.id;
-  }
-  if (!orgId) {
-    if (config.REGISTER_DOMAIN) {
-      if (domain !== config.REGISTER_DOMAIN) return { error: 'domain_blocked', message: `仅限 ${config.REGISTER_DOMAIN} 邮箱注册` };
-      let org = await getOrgByDomain(config.REGISTER_DOMAIN);
-      if (!org) { const oid = uuid(); await createOrg({ id: oid, name: config.REGISTER_DOMAIN, domain: config.REGISTER_DOMAIN, createdAt: Date.now() }); orgId = oid; }
-      else orgId = org.id;
-      role = 'admin';
-    } else {
-      const oid = uuid(); await createOrg({ id: oid, name: domain || '我的组织', domain, createdAt: Date.now() }); orgId = oid; role = 'admin';
-    }
   }
   const id = uuid();
   const isSuper = (config.SUPER_ADMIN_EMAILS.includes(String(email || '').toLowerCase())) ? 1 : 0;
@@ -130,7 +117,21 @@ async function listOrgShares(orgId) {
     ORDER BY s.created_at DESC`, [orgId]);
 }
 async function listOrgMembers(orgId) {
-  return drv.all('SELECT id, email, role, created_at FROM users WHERE org_id=? ORDER BY created_at ASC', [orgId]);
+  return drv.all('SELECT id, email, real_name, role, is_super, created_at FROM users WHERE org_id=? ORDER BY (role=\'admin\') DESC, created_at ASC', [orgId]);
+}
+// 门店重命名
+async function renameOrg(id, name) { await drv.run('UPDATE orgs SET name=? WHERE id=?', [name, id]); }
+// 删除门店（同时清理其邀请码；成员需先移出，由调用方校验）
+async function deleteOrg(id) {
+  await drv.run('DELETE FROM org_invites WHERE org_id=?', [id]);
+  await drv.run('DELETE FROM orgs WHERE id=?', [id]);
+}
+// 超级管理员视图：列出全部门店及人数/店长
+async function listOrgsWithStats() {
+  return drv.all(`SELECT o.id, o.name, o.domain, o.created_at,
+      (SELECT COUNT(*) FROM users u WHERE u.org_id=o.id) AS member_count,
+      (SELECT u.email FROM users u WHERE u.org_id=o.id AND u.role='admin' LIMIT 1) AS manager_email
+    FROM orgs o ORDER BY o.created_at ASC`);
 }
 async function createInvite({ code, orgId, createdBy, createdAt }) {
   await drv.run('INSERT INTO org_invites (code,org_id,created_by,created_at) VALUES (?,?,?,?)', [code, orgId, createdBy, createdAt]);
@@ -190,6 +191,10 @@ async function getFile(id) {
 async function replaceFileById(fileId, fields) {
   await drv.run('UPDATE files SET stored_name=?, mime=?, size=?, kind=?, preview_path=?, original_name=? WHERE id=?',
     [fields.storedName, fields.mime, fields.size, fields.kind, fields.previewPath || null, fields.originalName || '', fileId]);
+}
+// 重命名：仅改展示名（original_name），保持 file_id 不变（分享链接不变）。
+async function renameFileById(fileId, name) {
+  await drv.run('UPDATE files SET original_name=? WHERE id=?', [name, fileId]);
 }
 // 引用某文件的分享（用于权限校验与删除拦截）
 async function listSharesByFile(fileId) {
@@ -266,11 +271,14 @@ async function upsertApproval(shareId, viewerToken, status, now) {
 }
 
 // ---------- 会话与日志 ----------
-async function createSession({ token, shareId, viewerToken, expiresAt }) {
-  await drv.run('INSERT INTO sessions (token,share_id,viewer_token,expires_at) VALUES (?,?,?,?)', [token, shareId, viewerToken, expiresAt]);
+async function createSession({ token, shareId, viewerToken, expiresAt, unlocked = 0 }) {
+  await drv.run('INSERT INTO sessions (token,share_id,viewer_token,expires_at,unlocked) VALUES (?,?,?,?,?)', [token, shareId, viewerToken, expiresAt, unlocked ? 1 : 0]);
 }
 async function getSession(token) {
   return drv.get('SELECT * FROM sessions WHERE token=?', [token]) || null;
+}
+async function updateSessionUnlock(token, unlocked) {
+  await drv.run('UPDATE sessions SET unlocked=? WHERE token=?', [unlocked ? 1 : 0, token]);
 }
 async function logOpen({ shareId, viewerToken, ip, ua, now }) {
   const { device, os, browser } = track.parseUa(ua);
@@ -297,7 +305,7 @@ async function recordProgress({ shareId, viewerToken, ip, ua, event, progress, n
 async function getShareLogs(shareId) {
   return drv.all('SELECT viewer_token,ip,event,progress,created_at FROM logs WHERE share_id=? ORDER BY created_at DESC LIMIT 300', [shareId]);
 }
-// 按查看者聚合明细：首访/末访时间、打开次数、设备/系统/浏览器、地理位置、最后进度
+// 按查看者聚合明细：首访/末访时间、打开次数、设备/系统/浏览器、地理位置、最后进度、阅读时长
 async function getShareViewers(shareId) {
   const rows = await drv.all(`SELECT viewer_token,
       MIN(created_at) AS first_at, MAX(created_at) AS last_at,
@@ -307,15 +315,26 @@ async function getShareViewers(shareId) {
       MAX(device) AS device, MAX(os) AS os, MAX(browser) AS browser,
       MAX(country) AS country, MAX(region) AS region, MAX(city) AS city, MAX(ip) AS ip
     FROM logs WHERE share_id=? GROUP BY viewer_token ORDER BY last_at DESC`, [shareId]);
-  return rows.map(r => ({
-    viewerToken: r.viewer_token,
-    firstAt: Number(r.first_at), lastAt: Number(r.last_at),
-    events: Number(r.events), opens: Number(r.opens),
-    lastProgress: r.last_progress || '',
-    device: r.device || '未知', os: r.os || '未知', browser: r.browser || '未知',
-    country: r.country || '', region: r.region || '', city: r.city || '',
-    ip: r.ip || ''
-  }));
+  // 阅读时长：按事件时间排序，相邻间隔累加；单次间隔超过 GAP_CAP 视为离开/空闲，不再计入
+  const GAP_CAP = 5 * 60 * 1000;
+  const evs = await drv.all('SELECT viewer_token, created_at FROM logs WHERE share_id=? ORDER BY created_at ASC', [shareId]);
+  const byViewer = {};
+  for (const e of evs) { (byViewer[e.viewer_token] || (byViewer[e.viewer_token] = [])).push(Number(e.created_at)); }
+  return rows.map(r => {
+    const times = byViewer[r.viewer_token] || [];
+    let dur = 0;
+    for (let i = 1; i < times.length; i++) dur += Math.min(times[i] - times[i - 1], GAP_CAP);
+    return {
+      viewerToken: r.viewer_token,
+      firstAt: Number(r.first_at), lastAt: Number(r.last_at),
+      events: Number(r.events), opens: Number(r.opens),
+      lastProgress: r.last_progress || '',
+      device: r.device || '未知', os: r.os || '未知', browser: r.browser || '未知',
+      country: r.country || '', region: r.region || '', city: r.city || '',
+      ip: r.ip || '',
+      durationSec: Math.round(dur / 1000)
+    };
+  });
 }
 async function getPendingApprovals(shareId) {
   return drv.all("SELECT viewer_token,status,requested_at FROM approvals WHERE share_id=? AND status='pending'", [shareId]);
@@ -447,17 +466,17 @@ module.exports = {
   createUser, findUserByEmail, findUserByOpenid, createUserToken, getUserToken, getUserEmail,
   getUser, getUserBySupabaseId, ensureUser, updateUserOrg, countUsers,
   // orgs
-  createOrg, getOrg, getOrgByDomain, countOrgs, listOrgShares, listOrgMembers, createInvite, getInvite,
+  createOrg, getOrg, getOrgByDomain, countOrgs, listOrgShares, listOrgMembers, renameOrg, deleteOrg, listOrgsWithStats, createInvite, getInvite,
   // wechat
   createWechatState, getWechatState, confirmWechatState, setWechatLoginToken, setWechatVerifyIssued,
   // files
-  createFile, getFile, replaceFileById, listSharesByFile, countSharesByFile, listFilesForUser, listAllFiles,
+  createFile, getFile, replaceFileById, renameFileById, listSharesByFile, countSharesByFile, listFilesForUser, listAllFiles,
   // shares
   createShare, getShare, getShareMeta, setShareStatus, updateShareSettings,
   // access control / approvals
   countOpens, distinctViewers, getApproval, touchApproval, upsertApproval,
   // sessions / logs
-  createSession, getSession, logOpen, recordProgress, getShareLogs, getShareViewers, getPendingApprovals,
+  createSession, getSession, updateSessionUnlock, logOpen, recordProgress, getShareLogs, getShareViewers, getPendingApprovals,
   // admin
   listMySharesById, listMySharesByOwnerToken,
   // super admin

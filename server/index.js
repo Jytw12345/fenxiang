@@ -15,6 +15,23 @@ const PORT = config.PORT;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_UPLOAD = 200 * 1024 * 1024; // 200MB
 
+// 支持上传的文件格式白名单（与分享内容分类一致）。其余格式在读取文件体之前即拒绝，不上传。
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const ALLOWED_KINDS = new Set(['pdf', 'image', 'docx', 'source']);
+// 用于前端提示/校验消息的可读扩展名清单
+const SUPPORTED_EXTS = ['.pdf', '.docx', ...IMAGE_EXTS, ...preview.SOURCE_EXTS.filter(e => !IMAGE_EXTS.includes(e))];
+const SUPPORTED_HINT = '仅支持 PDF、Word(.docx)、常见图片(PNG/JPG/JPEG/GIF/WEBP/BMP) 与设计源文件(PSD/PSB/AI/CDR/EPS/INDD/TIF/TIFF/SVG/RAW/CR2/NEF/ARW)';
+
+// 根据扩展名 + MIME 判定分享内容类型；未知类型返回 'download'（即不在白名单内）
+function classifyKind(ext, mime) {
+  if (mime === 'application/pdf' || ext === '.pdf') return 'pdf';
+  if (IMAGE_EXTS.includes(ext) || (mime && mime.startsWith('image/'))) return 'image';
+  if (ext === '.docx' || mime === DOCX_MIME) return 'docx';
+  if (preview.SOURCE_EXTS.includes(ext)) return 'source';
+  return 'download';
+}
+
 // 注册频率限制（进程内存计数，足以拦截自动化批量注册；服务重启清零，单机场景足够）
 const regAttempts = new Map(); // key -> { count, first }
 function regSweep() {
@@ -199,48 +216,37 @@ async function resolveShareForAdmin(token, shareId) {
   if (sup) return s;
   return null;
 }
-// 解析新用户应归属的组织与角色
+// 解析新用户应归属的门店与角色。
+// 门店(org)由超级管理员在后台统一创建与分配；普通注册仅能凭有效邀请码加入指定门店，
+// 否则 org_id 为空（未入店），创建分享时将被网关拦截。
 async function resolveOrg(email, inviteCode) {
-  const domain = (String(email).split('@')[1] || '').toLowerCase();
   if (inviteCode) {
     const inv = await db.getInvite(inviteCode);
     if (!inv) return { error: 'invalid_invite', message: '邀请码无效' };
     return { orgId: inv.org_id, role: 'member' };
   }
-  if (domain) {
-    const org = await db.getOrgByDomain(domain);
-    if (org) return { orgId: org.id, role: 'member' }; // 同域名自动加入已有组织
-  }
-  if (config.REGISTER_DOMAIN) {
-    if (domain === config.REGISTER_DOMAIN) {
-      let org = await db.getOrgByDomain(domain);
-      if (!org) {
-        const orgId = uuid();
-        await db.createOrg({ id: orgId, name: config.REGISTER_DOMAIN, domain, createdAt: nowMs() });
-        org = { id: orgId };
-      }
-      return { orgId: org.id, role: 'admin' }; // 该域名首个注册者任店长
-    }
-    return { error: 'domain_blocked', message: `仅限 ${config.REGISTER_DOMAIN} 邮箱注册` };
-  }
-  // 开放多租户：新域名首个注册者自行创建组织并任店长
-  const orgId = uuid();
-  await db.createOrg({ id: orgId, name: domain || '我的组织', domain, createdAt: nowMs() });
-  return { orgId, role: 'admin' };
+  // 无邀请码：默认不归属任何门店（待超管在后台分配）
+  return { orgId: '', role: 'member' };
 }
 
 // ---------- 授权会话发放 ----------
 async function grantAccess(req, share, viewerToken) {
   const token = uuid();
   const ttl = (share.duration_sec > 0 ? share.duration_sec : 24 * 3600) * 1000;
-  await db.createSession({ token, shareId: share.id, viewerToken, expiresAt: nowMs() + ttl });
+  // 若分享设有「预览后需密码」，新建会话默认为未解锁；否则直接解锁
+  let extraObj = {};
+  try { extraObj = share.extra ? JSON.parse(share.extra) : {}; } catch (e) { extraObj = {}; }
+  const needUnlock = !!(extraObj.previewPages && extraObj.protectPassword);
+  await db.createSession({ token, shareId: share.id, viewerToken, expiresAt: nowMs() + ttl, unlocked: needUnlock ? 0 : 1 });
   const ip = req ? clientIp(req) : '';
   const ua = req ? (req.headers['user-agent'] || '') : '';
   await db.logOpen({ shareId: share.id, viewerToken, ip, ua, now: nowMs() });
   return {
     ok: true, accessToken: token, expiresIn: ttl, viewerToken,
     kind: share.kind, name: share.name, watermark: share.watermark,
-    restrictions: { copy: !!share.disable_copy, print: !!share.disable_print, download: !!share.disable_download, screenshot: !!share.disable_screenshot }
+    restrictions: { copy: !!share.disable_copy, print: !!share.disable_print, download: !!share.disable_download, screenshot: !!share.disable_screenshot },
+    previewPages: Number(extraObj.previewPages) || 0,
+    needProtect: needUnlock
   };
 }
 
@@ -347,10 +353,8 @@ const server = http.createServer(async (req, res) => {
       // 超级管理员：仅由 SUPER_ADMIN_EMAILS 名单指定（不再把首个注册用户自动设为超管）
       let orgRes;
       if (isSuper) {
-        const domain = (String(email).split('@')[1] || '').toLowerCase();
-        let org = await db.getOrgByDomain(domain || 'admin');
-        if (!org) { const oid = uuid(); await db.createOrg({ id: oid, name: domain || '管理员', domain: domain || 'admin', createdAt: nowMs() }); org = { id: oid }; }
-        orgRes = { orgId: org.id, role: 'admin' };
+        // 超级管理员为全局角色，不归属某一门店（门店由超管在后台统一创建与分配）
+        orgRes = { orgId: '', role: 'admin' };
       } else {
         orgRes = await resolveOrg(email, inviteCode);
         if (orgRes.error) return sendJson(res, 400, orgRes);
@@ -390,7 +394,7 @@ const server = http.createServer(async (req, res) => {
       const email = user ? user.email : '微信用户';
       let orgName = '';
       if (user && user.org_id) { const org = await db.getOrg(user.org_id); orgName = org ? org.name : ''; }
-      return sendJson(res, 200, { email, realName: user ? (user.real_name || '') : '', role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false, prefs: user ? parsePrefs(user.prefs) : {} });
+      return sendJson(res, 200, { id: user ? user.id : '', email, realName: user ? (user.real_name || '') : '', role: user ? user.role : 'member', orgId: user ? user.org_id : '', orgName, isSuper: user ? !!user.is_super : false, prefs: user ? parsePrefs(user.prefs) : {} });
     }
     if (req.method === 'PUT' && p === '/api/auth/profile') {
       const b = JSON.parse(await readBody(req, 1 << 20));
@@ -518,16 +522,16 @@ const server = http.createServer(async (req, res) => {
       const uploadToken = u.searchParams.get('userToken');
       const uploadIdn = await resolveIdentity(uploadToken);
       if (!uploadIdn || uploadIdn.type !== 'user') return sendJson(res, 401, { error: 'no_auth', message: '请先登录后再上传文件' });
-      const buf = await readBody(req);
-      if (!buf.length) return sendJson(res, 400, { error: 'empty' });
       const name = u.searchParams.get('name') ? decodeURIComponent(u.searchParams.get('name')) : 'file';
       const mime = u.searchParams.get('mime') || 'application/octet-stream';
       const ext = path.extname(name).toLowerCase();
-      let kind = 'download';
-      if (mime === 'application/pdf' || ext === '.pdf') kind = 'pdf';
-      else if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext) || mime.startsWith('image/')) kind = 'image';
-      else if (ext === '.docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') kind = 'docx';
-      else if (preview.SOURCE_EXTS.includes(ext)) kind = 'source'; // 设计源文件（PSD/AI/CDR 等）
+      // 白名单校验：不支持的格式在读取文件体之前直接拒绝，避免浪费带宽上传
+      const kind = classifyKind(ext, mime);
+      if (!ALLOWED_KINDS.has(kind)) {
+        return sendJson(res, 415, { error: 'unsupported_type', message: '不支持的文件格式：' + (ext || mime || '未知') + '。' + SUPPORTED_HINT });
+      }
+      const buf = await readBody(req);
+      if (!buf.length) return sendJson(res, 400, { error: 'empty' });
       const fileId = uuid();
       const stored = fileId + ext;
       await storage.save(stored, buf, mime);
@@ -555,6 +559,10 @@ const server = http.createServer(async (req, res) => {
       if (!body.userToken) return sendJson(res, 401, { error: 'no_auth', message: '请先登录后再创建分享' });
       const idn = await resolveIdentity(body.userToken);
       if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth', message: '登录已过期，请重新登录' });
+      const me = await db.getUser(idn.userId);
+      if (!me) return sendJson(res, 401, { error: 'no_auth', message: '账号不存在' });
+      // 未归属门店禁止创建分享：新注册未分配门店的用户无法分享，需由超管分配门店
+      if (!me.org_id) return sendJson(res, 403, { error: 'no_store', message: '您尚未归属任何门店，暂不能创建分享，请联系管理员为您分配门店' });
       const file = await db.getFile(body.fileId);
       if (!file) return sendJson(res, 404, { error: 'file_not_found' });
       const shareId = uuid().slice(0, 12);
@@ -614,11 +622,11 @@ const server = http.createServer(async (req, res) => {
       const name = u.searchParams.get('name') ? decodeURIComponent(u.searchParams.get('name')) : old.original_name;
       const mime = u.searchParams.get('mime') || old.mime || 'application/octet-stream';
       const ext = path.extname(name).toLowerCase();
-      let kind = 'download';
-      if (mime === 'application/pdf' || ext === '.pdf') kind = 'pdf';
-      else if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext) || mime.startsWith('image/')) kind = 'image';
-      else if (ext === '.docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') kind = 'docx';
-      else if (preview.SOURCE_EXTS.includes(ext)) kind = 'source';
+      // 白名单校验：替换为不支持的格式同样拒绝
+      const kind = classifyKind(ext, mime);
+      if (!ALLOWED_KINDS.has(kind)) {
+        return sendJson(res, 415, { error: 'unsupported_type', message: '不支持的文件格式：' + (ext || mime || '未知') + '。' + SUPPORTED_HINT });
+      }
       const newStored = uuid() + ext;
       await storage.save(newStored, buf, mime);
       let previewPath = old.preview_path;
@@ -660,6 +668,140 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // 重命名文件：保持 file_id / 分享链接不变，仅改展示名
+    if (req.method === 'PATCH' && /^\/api\/files\/[^\/]+$/.test(p)) {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const fileId = p.split('/')[3];
+      const old = await db.getFile(fileId);
+      if (!old) return sendJson(res, 404, { error: 'file_not_found' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const shares = await db.listSharesByFile(fileId);
+      if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) return sendJson(res, 403, { error: 'no_auth', message: '无权操作该文件' });
+      let body;
+      try { body = JSON.parse(await readBody(req, 1 << 16)); } catch (e) { return sendJson(res, 400, { error: 'bad_json' }); }
+      const name = String(body.name || '').trim();
+      if (!name) return sendJson(res, 400, { error: 'empty_name', message: '文件名不能为空' });
+      await db.renameFileById(fileId, name);
+      // 同步更新引用该文件的分享名称，保持列表展示一致
+      for (const sh of shares) { await db.run('UPDATE shares SET name=?, updated_at=? WHERE id=?', [name, nowMs(), sh.id]); }
+      await db.recordAudit(idn.userId, 'rename_file', fileId, `from=${old.original_name};to=${name}`);
+      return sendJson(res, 200, { fileId, name, message: '已重命名' });
+    }
+
+    // 下载文件：按 fileId 直下（文件本体可能在 COS），鉴权后流式返回
+    if (req.method === 'GET' && /^\/api\/files\/[^\/]+\/download$/.test(p)) {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const fileId = p.split('/')[3];
+      const f = await db.getFile(fileId);
+      if (!f) return sendJson(res, 404, { error: 'file_not_found' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const shares = await db.listSharesByFile(fileId);
+      if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) return sendJson(res, 403, { error: 'no_auth', message: '无权下载该文件' });
+      let buf;
+      try { buf = await storage.readBuffer(f.stored_name); } catch (e) { return sendJson(res, 404, { error: 'no_data', message: '文件存储不存在' }); }
+      const disp = 'attachment; filename="' + encodeURIComponent(f.original_name) + '"; filename*=UTF-8\'\'' + encodeURIComponent(f.original_name);
+      res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', disp);
+      res.setHeader('Content-Length', buf.length);
+      return res.end(buf);
+    }
+
+    // 预览图：图像类型返回原图，其它类型返回已生成的预览图；无可用预览则 404
+    if (req.method === 'GET' && /^\/api\/files\/[^\/]+\/preview$/.test(p)) {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const fileId = p.split('/')[3];
+      const f = await db.getFile(fileId);
+      if (!f) return sendJson(res, 404, { error: 'file_not_found' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const shares = await db.listSharesByFile(fileId);
+      if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) return sendJson(res, 403, { error: 'no_auth', message: '无权预览该文件' });
+      let stored = null, mime = 'image/png';
+      if (f.kind === 'image') { stored = f.stored_name; mime = f.mime || 'image/png'; }
+      else if (f.preview_path) { stored = f.preview_path; }
+      if (!stored) return sendJson(res, 404, { error: 'no_preview', message: '该文件无可用预览' });
+      let buf;
+      try { buf = await storage.readBuffer(stored); } catch (e) { return sendJson(res, 404, { error: 'no_data' }); }
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Disposition', 'inline; filename="preview"');
+      res.setHeader('Content-Length', buf.length);
+      return res.end(buf);
+    }
+
+    // 从已有文件一键创建分享（已有生效分享则直接复用其链接，避免重复创建）
+    if (req.method === 'POST' && /^\/api\/files\/[^\/]+\/share$/.test(p)) {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const fileId = p.split('/')[3];
+      const f = await db.getFile(fileId);
+      if (!f) return sendJson(res, 404, { error: 'file_not_found' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const shares = await db.listSharesByFile(fileId);
+      if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) return sendJson(res, 403, { error: 'no_auth', message: '无权操作该文件' });
+      const active = shares.find(s => s.status === 'active' && (isSuper || s.owner_id === idn.userId));
+      if (active) {
+        const link = `${(config.BASE_URL || u.origin)}/viewer.html?share=${active.id}`;
+        return sendJson(res, 200, { shareId: active.id, link, reused: true, name: f.original_name });
+      }
+      let quickSettings = {};
+      try { quickSettings = JSON.parse(await readBody(req, 1 << 16)); } catch (e) {}
+      const qs = quickSettings || {};
+      const am = (qs.authMode === 'approve' || qs.authMode === 'wechat') ? qs.authMode : 'open';
+      const extra = qs.extra || null;
+      const shareId = uuid().slice(0, 12);
+      const ownerToken = uuid();
+      await db.createShare({
+        shareId, fileId: f.id, ownerId: idn.userId, ownerToken, name: qs.name || f.original_name, kind: f.kind,
+        maxViewers: Number(qs.maxViewers) || 0, maxViews: Number(qs.maxViews) || 0, durationSec: Number(qs.durationSec) || 0,
+        expiresAt: qs.expiresAt ? Number(qs.expiresAt) : null, accessCode: qs.accessCode || null, authMode: am,
+        watermark: qs.watermark || '',
+        restrictions: {
+          copy: !!qs.disableCopy, print: !!qs.disablePrint,
+          download: !!qs.disableDownload, screenshot: !!qs.disableScreenshot
+        },
+        extra, createdAt: nowMs()
+      });
+      const link = `${(config.BASE_URL || u.origin)}/viewer.html?share=${shareId}`;
+      const QRCode = require('qrcode');
+      const qr = await QRCode.toDataURL(link);
+      await db.recordAudit(idn.userId, 'create_share', shareId, `from_file=${fileId};name=${f.original_name}`);
+      return sendJson(res, 200, { shareId, ownerToken, link, qr, name: qs.name || f.original_name, reused: false });
+    }
+
+    // 批量删除文件：仅无“生效中”分享引用的可删；被引用者返回失败明细，不中断其余
+    if (req.method === 'POST' && p === '/api/files/batch-delete') {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      let body;
+      try { body = JSON.parse(await readBody(req, 1 << 20)); } catch (e) { return sendJson(res, 400, { error: 'bad_json' }); }
+      const ids = Array.isArray(body.ids) ? body.ids.slice(0, 200) : [];
+      if (!ids.length) return sendJson(res, 400, { error: 'empty' });
+      const me = await db.getUser(idn.userId);
+      const isSuper = !!(me && me.is_super);
+      const ok = [], failed = [];
+      for (const fileId of ids) {
+        const old = await db.getFile(fileId);
+        if (!old) { failed.push({ fileId, reason: 'not_found' }); continue; }
+        const shares = await db.listSharesByFile(fileId);
+        if (!isSuper && !shares.some(s => s.owner_id === idn.userId)) { failed.push({ fileId, name: old.original_name, reason: 'no_auth' }); continue; }
+        const active = shares.filter(s => s.status === 'active');
+        if (active.length) { failed.push({ fileId, name: old.original_name, reason: 'in_use', shares: active.map(s => s.name) }); continue; }
+        for (const sh of shares) { await db.deleteShareRow(sh.id); }
+        try { await storage.delete(old.stored_name); } catch (e) {}
+        if (old.preview_path) { try { await storage.delete(old.preview_path); } catch (e) {} }
+        await db.deleteFileRow(fileId);
+        await db.recordAudit(idn.userId, 'delete_file', fileId, `batch;name=${old.original_name}`);
+        ok.push(fileId);
+      }
+      return sendJson(res, 200, { ok, failed, deleted: ok.length, failedCount: failed.length });
+    }
+
     // 数据概览（超管全局；普通登录用户仅本人数据）
     if (req.method === 'GET' && p === '/api/dashboard') {
       const idn = await resolveIdentity(u.searchParams.get('userToken'));
@@ -693,6 +835,11 @@ const server = http.createServer(async (req, res) => {
       const requiresCode = !!share.access_code;
       let extraObj = {};
       try { extraObj = share.extra ? JSON.parse(share.extra) : {}; } catch (e) { extraObj = {}; }
+      // 保护密码不暴露给前端，仅返回是否需要密码及预览页数
+      const safeExtra = {
+        previewPages: Number(extraObj.previewPages) || 0,
+        needProtect: !!(extraObj.previewPages && extraObj.protectPassword)
+      };
       return sendJson(res, 200, {
         shareId: share.id, name: share.name, kind: share.kind, status: share.status,
         preview: !!share.preview_path,
@@ -701,8 +848,27 @@ const server = http.createServer(async (req, res) => {
           copy: !!share.disable_copy, print: !!share.disable_print,
           download: !!share.disable_download, screenshot: !!share.disable_screenshot
         },
-        extra: extraObj
+        extra: safeExtra
       });
+    }
+
+    // 解锁后续内容：校验保护密码并标记会话已解锁
+    if (req.method === 'POST' && /^\/api\/share\/[^\/]+\/unlock$/.test(p)) {
+      const shareId = p.split('/')[3];
+      const body = JSON.parse(await readBody(req, 1 << 20));
+      const accessToken = body.accessToken;
+      const sess = accessToken ? await db.getSession(accessToken) : null;
+      if (!sess || Number(sess.expires_at) < nowMs() || sess.share_id !== shareId)
+        return sendJson(res, 403, { error: 'invalid_session', message: '会话无效或已过期，请重新申请打开' });
+      const share = await db.getShare(shareId);
+      if (!share) return sendJson(res, 404, { error: 'not_found' });
+      let extraObj = {};
+      try { extraObj = share.extra ? JSON.parse(share.extra) : {}; } catch (e) { extraObj = {}; }
+      if (!extraObj.protectPassword) return sendJson(res, 200, { ok: true });
+      if (body.password !== extraObj.protectPassword)
+        return sendJson(res, 403, { error: 'wrong_password', message: '密码错误' });
+      await db.updateSessionUnlock(accessToken, true);
+      return sendJson(res, 200, { ok: true });
     }
 
     // 访问鉴权（核心权限引擎）
@@ -832,6 +998,33 @@ const server = http.createServer(async (req, res) => {
       const idn = await resolveIdentity(token);
       await db.recordAudit(idn && idn.userId, action === 'destroy' ? 'destroy_share' : 'restore_share', shareId, `name=${share.name}`);
       return sendJson(res, 200, { ok: true, status: action === 'destroy' ? 'destroyed' : 'active' });
+    }
+
+    // 管理后台：彻底删除分享（同时清理访问记录、授权、会话；当文件不再被其他分享引用时删除文件字节）
+    if (req.method === 'DELETE' && /^\/api\/admin\/[^\/]+\/share\/[^\/]+$/.test(p)) {
+      const parts = p.split('/'); const token = parts[3]; const shareId = parts[5];
+      const share = await resolveShareForAdmin(token, shareId);
+      if (!share) return sendJson(res, 403, { error: 'no_auth' });
+      await db.run('DELETE FROM logs WHERE share_id=?', [shareId]);
+      await db.run('DELETE FROM approvals WHERE share_id=?', [shareId]);
+      await db.run('DELETE FROM sessions WHERE share_id=?', [shareId]);
+      await db.deleteShareRow(shareId);
+      let fileDeleted = false;
+      if (share.file_id) {
+        const cnt = await db.get('SELECT COUNT(*) AS c FROM shares WHERE file_id=? AND id<>?', [share.file_id, shareId]);
+        if (!cnt || Number(cnt.c) === 0) {
+          const f = await db.getFile(share.file_id);
+          if (f) {
+            try { await storage.delete(f.stored_name); } catch (e) {}
+            if (f.preview_path) { try { await storage.delete(f.preview_path); } catch (e) {} }
+            await db.deleteFileRow(share.file_id);
+            fileDeleted = true;
+          }
+        }
+      }
+      const idn = await resolveIdentity(token);
+      await db.recordAudit(idn && idn.userId, 'delete_share', shareId, `name=${share.name};fileDeleted=${fileDeleted}`);
+      return sendJson(res, 200, { ok: true, fileDeleted });
     }
 
     // 管理后台：修改权限
@@ -1019,6 +1212,118 @@ const server = http.createServer(async (req, res) => {
         await db.recordAudit(sup.id, 'delete_user', targetId, `email=${target.email};shares=${shares.length}`);
       }
       return sendJson(res, 200, { ok: true });
+    }
+
+    // ---------- 超级管理员：门店(org)管理 ----------
+    if (req.method === 'GET' && p === '/api/super/orgs') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const orgs = await db.listOrgsWithStats();
+      return sendJson(res, 200, { orgs: orgs.map(o => ({
+        id: o.id, name: o.name, domain: o.domain || '', createdAt: Number(o.created_at),
+        memberCount: Number(o.member_count) || 0, managerEmail: o.manager_email || ''
+      })) });
+    }
+    if (req.method === 'POST' && p === '/api/super/org') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const name = String(b.name || '').trim();
+      if (!name) return sendJson(res, 400, { error: 'name_required', message: '门店名称不能为空' });
+      const id = uuid();
+      await db.createOrg({ id, name, domain: '', createdAt: nowMs() });
+      await db.recordAudit(sup.id, 'create_org', 'org', `id=${id};name=${name}`);
+      return sendJson(res, 200, { ok: true, id, name });
+    }
+    // 门店成员列表（超管查看任意门店）
+    const orgMembersM = p.match(/^\/api\/super\/org\/([^/]+)\/members$/);
+    if (orgMembersM && req.method === 'GET') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const org = await db.getOrg(orgMembersM[1]);
+      if (!org) return sendJson(res, 404, { error: 'no_org', message: '门店不存在' });
+      const members = await db.listOrgMembers(orgMembersM[1]);
+      return sendJson(res, 200, { members: members.map(m => ({
+        id: m.id, email: m.email, realName: m.real_name || '', role: m.role, isSuper: !!Number(m.is_super), createdAt: Number(m.created_at)
+      })) });
+    }
+    const orgM = p.match(/^\/api\/super\/org\/([^/]+)$/);
+    if (orgM && (req.method === 'PUT' || req.method === 'DELETE')) {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const orgId = orgM[1];
+      const org = await db.getOrg(orgId);
+      if (!org) return sendJson(res, 404, { error: 'no_org', message: '门店不存在' });
+      if (req.method === 'DELETE') {
+        const members = await db.listOrgMembers(orgId);
+        if (members && members.length) return sendJson(res, 409, { error: 'has_members', message: '该门店仍有成员，请先将成员移出或分配到其他门店' });
+        await db.deleteOrg(orgId);
+        await db.recordAudit(sup.id, 'delete_org', 'org', `id=${orgId};name=${org.name}`);
+        return sendJson(res, 200, { ok: true });
+      }
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const name = String(b.name || '').trim();
+      if (!name) return sendJson(res, 400, { error: 'name_required', message: '门店名称不能为空' });
+      await db.renameOrg(orgId, name);
+      await db.recordAudit(sup.id, 'rename_org', 'org', `id=${orgId};name=${name}`);
+      return sendJson(res, 200, { ok: true });
+    }
+    // 超管：将用户分配到门店并设置角色（orgId 为空表示移出门店）
+    const userOrgM = p.match(/^\/api\/super\/user\/([^/]+)\/org$/);
+    if (userOrgM && req.method === 'POST') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      const targetId = userOrgM[1];
+      if (targetId === sup.id) return sendJson(res, 400, { error: 'self_op', message: '不能对自己执行该操作' });
+      const target = await db.getUser(targetId);
+      if (!target) return sendJson(res, 404, { error: 'no_user', message: '用户不存在' });
+      const b = JSON.parse(await readBody(req, 1 << 20));
+      const orgId = String(b.orgId || '').trim();
+      const role = b.role === 'admin' ? 'admin' : 'member';
+      if (orgId) {
+        const org = await db.getOrg(orgId);
+        if (!org) return sendJson(res, 400, { error: 'invalid_org', message: '门店不存在' });
+      }
+      await db.updateUserOrg({ userId: targetId, orgId: orgId || '', role });
+      await db.recordAudit(sup.id, 'set_org', targetId, `email=${target.email};orgId=${orgId};role=${role}`);
+      return sendJson(res, 200, { ok: true });
+    }
+    // ---------- 店长：查看本店成员分享/日志明细 ----------
+    const memberDetailM = p.match(/^\/api\/org\/members\/([^/]+)\/detail$/);
+    if (memberDetailM && req.method === 'GET') {
+      const admin = await requireAdmin(u.searchParams.get('userToken'));
+      if (!admin) return sendJson(res, 403, { error: 'no_admin', message: '仅店长可查看' });
+      const memberId = memberDetailM[1];
+      const member = await db.getUser(memberId);
+      if (!member || member.org_id !== admin.org_id) return sendJson(res, 404, { error: 'no_member', message: '成员不存在或非本店成员' });
+      const memberShares = await db.listMySharesById(member.id);
+      const shares = memberShares.map(s => ({
+        shareId: s.id, name: s.name, kind: s.kind, status: s.status,
+        opens: s.opens, viewers: s.viewers, expiresAt: s.expires_at, link: `/viewer.html?share=${s.id}`
+      }));
+      // 汇总该成员所有分享的访客与原始日志
+      const viewerMap = {};
+      const logs = [];
+      for (const s of memberShares) {
+        const vs = await db.getShareViewers(s.id);
+        for (const v of vs) {
+          const cur = viewerMap[v.viewerToken] || {
+            viewerToken: v.viewerToken, opens: 0, durationSec: 0, lastAt: 0, firstAt: v.firstAt,
+            device: v.device, os: v.os, browser: v.browser, ip: v.ip, country: v.country, region: v.region, city: v.city
+          };
+          cur.opens += (v.opens || 0);
+          cur.durationSec += (v.durationSec || 0);
+          if (Number(v.lastAt) > cur.lastAt) cur.lastAt = Number(v.lastAt);
+          viewerMap[v.viewerToken] = cur;
+        }
+        const ls = await db.getShareLogs(s.id);
+        for (const l of ls) logs.push({ shareId: s.id, shareName: s.name, event: l.event, progress: l.progress, ip: l.ip, createdAt: Number(l.created_at) });
+      }
+      const viewers = Object.values(viewerMap).sort((a, b) => b.lastAt - a.lastAt);
+      return sendJson(res, 200, {
+        member: { id: member.id, email: member.email, realName: member.real_name || '', role: member.role, isSuper: !!Number(member.is_super) },
+        shares, viewers, logs
+      });
     }
 
     return sendJson(res, 404, { error: 'route_not_found' });

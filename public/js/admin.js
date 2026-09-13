@@ -2,6 +2,44 @@
 const $ = (s) => document.querySelector(s);
 const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); };
 
+// ---- 自定义确认/提示弹窗：替代系统原生 confirm/alert，避免阻塞页面与体验割裂 ----
+// openDialog 返回一个 Promise<boolean>（single=true 时 Promise<true>），复用 .modal/.box 样式动态生成。
+let _dlgSeq = 0;
+function openDialog({ title = '', message = '', okText = '确定', cancelText = '取消', danger = false, single = false } = {}) {
+  return new Promise((resolve) => {
+    const id = 'dlg_' + (++_dlgSeq);
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.id = id;
+    modal.innerHTML = `<div class="box" style="text-align:left;">
+      ${title ? `<div class="dlg-title">${esc(title)}</div>` : ''}
+      <div class="dlg-msg">${esc(message)}</div>
+      <div class="dlg-acts">
+        ${single ? '' : `<button class="btn ghost" id="${id}_cancel">${esc(cancelText)}</button>`}
+        <button class="btn ${danger ? 'danger' : ''}" id="${id}_ok">${esc(okText)}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+    let done = false;
+    const close = (val) => {
+      if (done) return; done = true;
+      document.removeEventListener('keydown', onKey);
+      modal.classList.remove('show');
+      setTimeout(() => modal.remove(), 200);
+      resolve(val);
+    };
+    function onKey(e) { if (e.key === 'Escape') close(false); }
+    document.addEventListener('keydown', onKey);
+    modal.addEventListener('click', (e) => { if (e.target === modal && !danger) close(false); });
+    modal.classList.add('show');
+    modal.querySelector('#' + id + '_ok').onclick = () => close(true);
+    const cancelBtn = modal.querySelector('#' + id + '_cancel');
+    if (cancelBtn) cancelBtn.onclick = () => close(false);
+  });
+}
+const confirmDialog = (message, opts = {}) => openDialog({ message, ...opts });
+const alertDialog = (message, opts = {}) => openDialog({ message, single: true, ...opts });
+
 let token = localStorage.getItem('userToken');
 // 安全：后台界面必须登录后才能进入。不再使用 ownerToken（匿名创建者无法进入管理后台）。
 const userArea = document.getElementById('userArea');
@@ -14,6 +52,7 @@ function showUser(email) {
   const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   userArea.innerHTML = `👤 ${safe} · <a href="#" id="logoutLink">退出</a>`;
   document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); logout(); };
+  loadAndApplyPrefs();
 }
 window.afterLogin = showUser; // 供 login-modal.js 登录成功后刷新右上角
 async function initUserArea() {
@@ -46,24 +85,39 @@ if (!token) {
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// 标签数据缓存：切换标签不再每次重新拉取，消除“切换=整页刷新”的观感（尤其 Supabase 东京区冷启动 6-8s 时）。
+// panelLoaded[t] 为 true 表示已加载过，切换回来只切 display，不回源。
+const panelLoaded = {};
+let meState = null;       // 当前登录用户信息（role/isSuper/orgName）
+let mineShares = [];      // 我的分享本地缓存（乐观更新用）
+
 async function load() {
   if (!token) return;
   const r = await fetch('/api/admin/' + token);
   const d = await r.json();
+  mineShares = d.shares || [];
+  renderMineGrid();
+}
+// 用本地缓存重渲染「我的分享」网格（无网络请求，乐观更新用）
+function renderMineGrid() {
   const list = $('#list');
-  if (!d.shares || !d.shares.length) { $('#empty').style.display = 'block'; list.innerHTML = ''; return; }
+  if (!mineShares || !mineShares.length) { $('#empty').style.display = 'block'; list.innerHTML = ''; return; }
   $('#empty').style.display = 'none';
-  list.innerHTML = `<div class="card-grid">` + d.shares.map(s => shareCardHtml(s, true)).join('') + `</div>`;
+  list.innerHTML = `<div class="card-grid">` + mineShares.map(s => shareCardHtml(s, true)).join('') + `</div>`;
 }
 // 紧凑分享卡片（网格布局）。own=true 表示是“我的分享”，展示替换文件入口。
 function shareCardHtml(s, own) {
   const link = location.origin + s.link;
   const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleString() : '永久';
   const r = s.restrictions || {};
+  const extra = s.extra || {};
+  const hasPreviewLimit = !!(extra.previewPages && Number(extra.previewPages) > 0);
   const tags = [
     s.status === 'active' ? '<span class="tag on">已上架</span>' : '<span class="tag off">已销毁</span>',
     s.authMode === 'approve' ? '<span class="tag on">需授权</span>' : '',
     s.accessCode ? '<span class="tag on">有访问码</span>' : '',
+    hasPreviewLimit ? '<span class="tag on">限前' + extra.previewPages + '页</span>' : '',
+    hasPreviewLimit && extra.protectPassword ? '<span class="tag on">有密码</span>' : '',
     r.copy ? '<span class="tag off">禁复制</span>' : '', r.print ? '<span class="tag off">禁打印</span>' : '',
     r.download ? '<span class="tag off">禁下载</span>' : '', r.screenshot ? '<span class="tag off">防截图</span>' : ''
   ].join('');
@@ -79,79 +133,187 @@ function shareCardHtml(s, own) {
       : `<button class="btn sm" onclick="restore('${s.shareId}')">恢复</button>`
   ].join('');
   return `<div class="share-card">
-    <div class="hd"><div class="nm" title="${esc(s.name)}">${esc(s.name)}</div><div class="badge">${s.kind}</div></div>
+    <div class="hd">
+      <div class="nm" title="${esc(s.name)}">${esc(s.name)}</div>
+      <div class="rt">
+        <div class="badge">${s.kind}</div>
+        <button class="del" title="删除分享及文件" onclick="deleteShare('${s.shareId}')">删除</button>
+      </div>
+    </div>
     <div class="meta">打开 ${s.opens} 次 · 访客 ${s.viewers} 人 · 有效期至 ${exp}${s.maxViewers ? ' · 上限 ' + s.maxViewers + '人' : ''}</div>
     <div class="tags">${tags}</div>
     <div class="acts">${acts}</div>
   </div>`;
 }
 window.copyLink = (l) => { navigator.clipboard.writeText(l); toast('已复制'); };
+
+// 格式化阅读时长（秒 → 中文）
+function fmtDur(sec) {
+  sec = Number(sec) || 0;
+  if (sec < 60) return sec + ' 秒';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return s ? `${m} 分 ${s} 秒` : `${m} 分`;
+  const h = Math.floor(m / 60), mm = m % 60;
+  return mm ? `${h} 时 ${mm} 分` : `${h} 时`;
+}
+// 格式化进度（p2/10 → 第 2/10 页）
+function fmtProg(p) {
+  if (!p) return '—';
+  const m = String(p).match(/p(\d+)\/(\d+)/);
+  return m ? `第 ${m[1]}/${m[2]} 页` : esc(p);
+}
+
 window.showLogs = async (id) => {
   const r = await fetch(`/api/admin/${token}/share/${id}/viewers`); const d = await r.json();
   const v = d.viewers || [];
   if (!v.length) { $('#logsBody').innerHTML = '<p class="sub">暂无访问记录</p>'; $('#logsModal').classList.add('show'); return; }
-  $('#logsBody').innerHTML = `<table class="vt">
-    <tr><th>查看者</th><th>IP</th><th>位置</th><th>设备/系统</th><th>浏览器</th><th>首次访问</th><th>最近访问</th><th>次数</th></tr>
-    ${v.map(x => {
-      const loc = [x.country, x.region, x.city].filter(Boolean).join('·') || '—';
-      const dev = [x.device, x.os].filter(Boolean).join('/');
-      const first = new Date(x.firstAt).toLocaleString();
-      const last = new Date(x.lastAt).toLocaleString();
-      return `<tr>
-        <td>${esc(x.viewerToken.slice(0,8))}<br><span class="sub">进度 ${esc(x.lastProgress || '—')}</span></td>
-        <td>${esc(x.ip || '—')}</td>
-        <td>${esc(loc)}</td>
-        <td>${esc(dev)}</td>
-        <td>${esc(x.browser)}</td>
-        <td>${first}</td>
-        <td>${last}</td>
-        <td>${x.opens} 次</td>
-      </tr>`;
-    }).join('')}
-  </table>
-  <p class="sub" style="margin-top:10px">注：IP 与地理位置由访客网络决定，可能受代理 / 移动网络影响；内网访问标记为「内网/局域网」。</p>`;
+  const totalViewers = v.length;
+  const totalReads = v.reduce((a, b) => a + (b.opens || 0), 0);
+  const durs = v.map(x => x.durationSec || 0);
+  const avgDur = Math.round(durs.reduce((a, b) => a + b, 0) / totalViewers);
+  const maxDur = Math.max(...durs, 0);
+  $('#logsBody').innerHTML = `
+    <div class="vsum">
+      <div class="vsum-i"><b>${totalViewers}</b><span>查看人数</span></div>
+      <div class="vsum-i"><b>${totalReads}</b><span>阅读次数</span></div>
+      <div class="vsum-i"><b>${fmtDur(avgDur)}</b><span>平均时长</span></div>
+      <div class="vsum-i"><b>${fmtDur(maxDur)}</b><span>最长时长</span></div>
+    </div>
+    <div class="vlist">
+      ${v.map(x => {
+        const loc = [x.country, x.region, x.city].filter(Boolean).join('·') || '—';
+        const dev = [x.device, x.os].filter(Boolean).join('/');
+        const first = new Date(x.firstAt).toLocaleString();
+        const last = new Date(x.lastAt).toLocaleString();
+        return `<div class="vcard">
+          <div class="vtop">
+            <div class="vid">查看者 <b>${esc(x.viewerToken.slice(0, 8))}</b></div>
+            <div class="vdur">${fmtDur(x.durationSec)}</div>
+          </div>
+          <div class="vmeta"><span>阅读 ${x.opens} 次</span><span>进度 ${fmtProg(x.lastProgress)}</span></div>
+          <div class="vdev">${esc(dev || '—')} · ${esc(x.browser || '—')}</div>
+          <div class="vsub">${esc(x.ip || '—')} · ${esc(loc)}</div>
+          <div class="vtime">首次 ${first} · 最近 ${last}</div>
+        </div>`;
+      }).join('')}
+    </div>
+    <p class="sub" style="margin-top:12px">注：阅读时长按访问事件间隔累加（单次离开超过 5 分钟不计）；IP 与地理位置可能受代理 / 移动网络影响，内网访问标记为「内网/局域网」。</p>`;
   $('#logsModal').classList.add('show');
 };
-window.destroy = async (id) => { await fetch(`/api/admin/${token}/share/${id}/destroy`, { method: 'POST' }); toast('已远程销毁'); load(); };
-window.restore = async (id) => { await fetch(`/api/admin/${token}/share/${id}/restore`, { method: 'POST' }); toast('已恢复'); load(); };
+window.destroy = async (id) => {
+  await fetch(`/api/admin/${token}/share/${id}/destroy`, { method: 'POST' });
+  toast('已远程销毁');
+  mineShares = mineShares.map(s => s.shareId === id ? { ...s, status: 'destroyed' } : s);
+  renderMineGrid();
+};
+window.restore = async (id) => {
+  await fetch(`/api/admin/${token}/share/${id}/restore`, { method: 'POST' });
+  toast('已恢复');
+  mineShares = mineShares.map(s => s.shareId === id ? { ...s, status: 'active' } : s);
+  renderMineGrid();
+};
+// 彻底删除分享：清理配置链接、访问记录、授权、会话；文件若未被其他分享引用则一并删除
+window.deleteShare = async (id) => {
+  const s = mineShares.find(x => x.shareId === id);
+  const name = s ? s.name : '该分享';
+  if (!(await confirmDialog(`确定彻底删除「${name}」？\n分享链接将失效，所有访问记录、授权记录会被清理；若文件未被其他分享引用，文件本身也会一并删除。`, { danger: true, title: '删除分享' }))) return;
+  const r = await fetch(`/api/admin/${token}/share/${id}`, { method: 'DELETE' });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    alertDialog('删除失败：' + (d.message || r.statusText), { title: '错误' });
+    return;
+  }
+  toast('已删除分享');
+  mineShares = mineShares.filter(s => s.shareId !== id);
+  renderMineGrid();
+};
 
 let editId = null;
 window.editShare = async (id) => {
   editId = id;
   const r = await fetch(`/api/admin/${token}`); const d = await r.json();
   const s = d.shares.find(x => x.shareId === id);
+  const extra = s.extra || {};
+  const pp = Number(extra.previewPages) || 0;
+  const pEnabled = pp > 0;
+  // 有效期：判断是预设还是自定义
+  let expSelect = '0', expCustom = '';
+  if (s.expiresAt) {
+    const preset = [1,3,7,30].find(n => Math.abs(s.expiresAt - (Date.now() + n * 86400000)) < 3600000);
+    if (preset) expSelect = String(preset);
+    else { expSelect = 'custom'; expCustom = new Date(s.expiresAt).toISOString().slice(0, 16); }
+  }
   $('#editBody').innerHTML = `
-    <div class="row">
-      <div class="field"><label>有效期(天,0=永久)</label><input id="eExp" type="number" value="${s.expiresAt ? Math.ceil((s.expiresAt - Date.now())/86400000) : 0}"></div>
-      <div class="field"><label>最大人数</label><input id="eMV" type="number" value="${s.maxViewers}"></div>
+    <div class="edit-grid">
+      <div class="efield"><label>有效期</label>
+        <select id="eExpire">
+          <option value="0" ${expSelect==='0'?'selected':''}>永久有效</option>
+          <option value="1" ${expSelect==='1'?'selected':''}>1 天</option>
+          <option value="3" ${expSelect==='3'?'selected':''}>3 天</option>
+          <option value="7" ${expSelect==='7'?'selected':''}>7 天</option>
+          <option value="30" ${expSelect==='30'?'selected':''}>30 天</option>
+          <option value="custom" ${expSelect==='custom'?'selected':''}>自定义时间</option>
+        </select>
+        <input type="datetime-local" id="eExpireCustom" value="${esc(expCustom)}" style="display:${expSelect==='custom'?'block':'none'};margin-top:6px" />
+      </div>
+      <div class="efield"><label>访问码 <small>留空不设</small></label><input id="eCode" value="${s.accessCode || ''}" placeholder="访问码" /></div>
+      <div class="efield"><label>验证方式</label><select id="eAuth"><option value="open" ${s.authMode==='open'?'selected':''}>公开</option><option value="approve" ${s.authMode==='approve'?'selected':''}>申请授权</option></select></div>
+      <div class="efield"><label>最大人数 <small>0=不限</small></label><input id="eMV" type="number" value="${s.maxViewers}"></div>
+      <div class="efield"><label>最大次数 <small>0=不限</small></label><input id="eMO" type="number" value="${s.maxViews}"></div>
+      <div class="efield"><label>单次时长(分) <small>0=不限</small></label><input id="eDur" type="number" value="${Math.round(s.durationSec/60)}"></div>
     </div>
-    <div class="row">
-      <div class="field"><label>最大次数</label><input id="eMO" type="number" value="${s.maxViews}"></div>
-      <div class="field"><label>单次时长(分)</label><input id="eDur" type="number" value="${Math.round(s.durationSec/60)}"></div>
-    </div>
-    <div class="field"><label>访问码</label><input id="eCode" value="${s.accessCode || ''}"></div>
-    <div class="field"><label>验证方式</label><select id="eAuth"><option value="open" ${s.authMode==='open'?'selected':''}>公开</option><option value="approve" ${s.authMode==='approve'?'selected':''}>申请授权</option></select></div>
-    <div class="field"><label>水印</label><input id="eWm" value="${esc(s.watermark)}"></div>
-    <div class="checks">
+    <div class="efield"><label>水印</label><input id="eWm" value="${esc(s.watermark)}" placeholder="水印文字" /></div>
+    <div class="edit-checks">
       <label><input type="checkbox" id="eCopy" ${s.restrictions.copy?'checked':''}>禁复制</label>
       <label><input type="checkbox" id="ePrint" ${s.restrictions.print?'checked':''}>禁打印</label>
       <label><input type="checkbox" id="eDl" ${s.restrictions.download?'checked':''}>禁下载</label>
       <label><input type="checkbox" id="eSc" ${s.restrictions.screenshot?'checked':''}>防截图</label>
+    </div>
+    <div class="edit-checks" style="margin-top:10px;background:#f9fafc;padding:10px;border-radius:8px;border:1px solid var(--line)">
+      <label style="width:100%;margin-bottom:6px"><input type="checkbox" id="ePreview" ${pEnabled?'checked':''}> 仅允许预览前 <input id="ePPages" type="number" min="1" value="${pEnabled?pp:2}" style="width:60px;text-align:center" /> 页，后续内容需密码 <input id="ePPwd" type="text" value="${esc(extra.protectPassword||'')}" placeholder="后续密码" style="width:120px" /> 查看</label>
     </div>`;
+  const eExpire = document.getElementById('eExpire');
+  if (eExpire) eExpire.addEventListener('change', () => {
+    const ec = document.getElementById('eExpireCustom');
+    if (ec) ec.style.display = eExpire.value === 'custom' ? 'block' : 'none';
+  });
   $('#editModal').classList.add('show');
 };
 $('#saveEdit').onclick = async () => {
-  const expVal = parseInt($('#eExp').value, 10) || 0;
+  const eExpire = $('#eExpire');
+  let expiresAt = null;
+  if (eExpire && eExpire.value === 'custom') {
+    const v = $('#eExpireCustom').value;
+    const dt = v ? new Date(v).getTime() : 0;
+    if (dt > Date.now()) expiresAt = dt;
+  } else {
+    const expVal = parseInt(eExpire ? eExpire.value : '0', 10) || 0;
+    if (expVal > 0) expiresAt = Date.now() + expVal * 86400000;
+  }
+  const previewEnabled = $('#ePreview').checked;
+  const previewPages = previewEnabled ? (parseInt($('#ePPages').value, 10) || 2) : 0;
+  const protectPassword = previewEnabled ? ($('#ePPwd').value.trim() || null) : null;
+  const extra = { previewPages };
+  if (protectPassword) extra.protectPassword = protectPassword;
   const body = {
     maxViewers: parseInt($('#eMV').value, 10) || 0, maxViews: parseInt($('#eMO').value, 10) || 0,
     durationSec: (parseInt($('#eDur').value, 10) || 0) * 60, accessCode: $('#eCode').value.trim() || null,
     authMode: $('#eAuth').value, watermark: $('#eWm').value.trim(),
     disableCopy: $('#eCopy').checked, disablePrint: $('#ePrint').checked,
     disableDownload: $('#eDl').checked, disableScreenshot: $('#eSc').checked,
-    expiresAt: expVal ? Date.now() + expVal * 86400000 : null
+    expiresAt,
+    extra
   };
   await fetch(`/api/admin/${token}/share/${editId}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  $('#editModal').classList.remove('show'); toast('权限已更新'); load();
+  $('#editModal').classList.remove('show'); toast('权限已更新');
+  // 乐观更新：把新权限写回本地缓存并重渲染，不重新拉取整表
+  mineShares = mineShares.map(s => s.shareId === editId ? {
+    ...s, maxViewers: body.maxViewers, maxViews: body.maxViews, durationSec: body.durationSec,
+    accessCode: body.accessCode, authMode: body.authMode, watermark: body.watermark, expiresAt: body.expiresAt,
+    restrictions: { copy: body.disableCopy, print: body.disablePrint, download: body.disableDownload, screenshot: body.disableScreenshot },
+    extra: body.extra
+  } : s);
+  renderMineGrid();
 };
 
 window.showApprovals = async (id) => {
@@ -168,86 +330,25 @@ window.decide = async (id, vt, decision) => {
   toast(decision === 'approve' ? '已授权' : '已拒绝'); showApprovals(id);
 };
 
-load();
+// 后台预载默认标签（与 initOrg 的 me 请求并发），避免首屏串行等待；panelLoaded 标记防止 switchTab 重复拉取
+if (!panelLoaded.mine) { load(); panelLoaded.mine = true; }
 
 // ---------- 店长（组织）后台 ----------
 const orgToken = localStorage.getItem('userToken');
 async function initOrg() {
   if (!orgToken) return;
-  let me;
-  try { const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(orgToken)); me = await r.json(); }
+  try { const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(orgToken)); meState = await r.json(); }
   catch (e) { return; }
-  if (!me) return;
+  if (!meState) return;
 
   const tabs = $('#tabs');
-  const list = $('#list');
-  const orgPanel = $('#orgPanel');
-  const superPanel = $('#superPanel');
-  const sub = { org: $('#orgShares'), members: $('#orgMembers'), invite: $('#orgInvite') };
-  // 所有登录用户都能看到「我的分享」
   tabs.style.display = 'flex';
-  // 店长才显示组织管理 tab；普通成员隐藏
-  if (me.role === 'admin') {
+  if (meState.role === 'admin') {
     document.querySelectorAll('.tab[data-tab="org"], .tab[data-tab="members"], .tab[data-tab="invite"]').forEach(el => el.style.display = '');
   } else {
     document.querySelectorAll('.tab[data-tab="org"], .tab[data-tab="members"], .tab[data-tab="invite"]').forEach(el => el.style.display = 'none');
   }
-  // 超级管理员额外 tab
-  if (me.isSuper) { $('#tabAllShares').style.display = ''; $('#tabStats').style.display = ''; $('#tabDashboard').style.display = ''; $('#tabUsers').style.display = ''; $('#tabAudit').style.display = ''; }
-  // 所有登录用户可见「文件管理」tab（tabFiles 已默认显示）
-
-  const superTabs = ['allshares', 'stats', 'dashboard', 'users', 'audit'];
-  function highlightSideNav(t) {
-    document.querySelectorAll('#sideNav a').forEach(a => a.classList.remove('active'));
-    let key = 'mine';
-    if (t === 'files') key = 'files';
-    else if (superTabs.includes(t) || ['org', 'members', 'invite'].includes(t)) key = 'super';
-    const a = document.querySelector(`#sideNav a[data-key="${key}"]`);
-    if (a) a.classList.add('active');
-  }
-  function switchTab(t) {
-    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-    const btn = document.querySelector(`.tab[data-tab="${t}"]`);
-    if (btn) btn.classList.add('active');
-    // 隐藏所有面板
-    list.style.display = 'none'; orgPanel.style.display = 'none'; superPanel.style.display = 'none';
-    $('#filesPanel').style.display = 'none'; $('#dashboardPanel').style.display = 'none';
-    if (superTabs.includes(t)) {
-      superPanel.style.display = 'block';
-      $('#superAllShares').style.display = t === 'allshares' ? 'block' : 'none';
-      $('#superStats').style.display = t === 'stats' ? 'block' : 'none';
-      $('#superUsers').style.display = t === 'users' ? 'block' : 'none';
-      $('#superAudit').style.display = t === 'audit' ? 'block' : 'none';
-      if (t === 'allshares') loadAllShares();
-      if (t === 'stats') loadStats();
-      if (t === 'users') loadUsers();
-      if (t === 'audit') loadAudit();
-    } else if (t === 'mine') { list.style.display = 'block'; load(); }
-    else if (t === 'files') { $('#filesPanel').style.display = 'block'; loadFiles(); }
-    else if (t === 'dashboard') { $('#dashboardPanel').style.display = 'block'; loadDashboard(); }
-    else {
-      orgPanel.style.display = 'block';
-      sub.org.style.display = t === 'org' ? 'block' : 'none';
-      sub.members.style.display = t === 'members' ? 'block' : 'none';
-      sub.invite.style.display = t === 'invite' ? 'block' : 'none';
-      if (t === 'org') loadOrgShares();
-      if (t === 'members') loadMembers();
-    }
-    highlightSideNav(t);
-  }
-  document.querySelectorAll('.tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const t = btn.dataset.tab;
-      if (location.hash !== '#' + t) {
-        history.replaceState(null, '', '#' + t);
-      }
-      switchTab(t);
-    });
-  });
-  // 根据 URL hash 初始化 tab；默认 mine
-  const initTab = location.hash.replace('#', '') || 'mine';
-  switchTab(initTab);
-  window.addEventListener('hashchange', () => switchTab(location.hash.replace('#', '') || 'mine'));
+  if (meState.isSuper) { $('#tabAllShares').style.display=''; $('#tabStats').style.display=''; $('#tabDashboard').style.display=''; $('#tabUsers').style.display=''; $('#tabAudit').style.display=''; $('#tabStores').style.display=''; }
 
   $('#genInvite').addEventListener('click', async () => {
     const r = await fetch('/api/org/invite?userToken=' + encodeURIComponent(orgToken), { method: 'POST' });
@@ -255,6 +356,97 @@ async function initOrg() {
     if (d.code) { const c = $('#inviteCode'); c.textContent = '邀请码：' + d.code; c.style.display = 'inline-block'; toast('已生成：' + d.code); }
   });
 }
+
+// ---------- 全局标签切换（无刷新；创建分享/设置已合并进本页） ----------
+const superTabs = ['allshares', 'stats', 'dashboard', 'users', 'audit', 'stores'];
+function highlightSideNav(t) {
+  document.querySelectorAll('#sideNav a').forEach(a => a.classList.remove('active'));
+  let key = 'mine';
+  if (t === 'create') key = 'create';
+  else if (t === 'settings') key = 'settings';
+  else if (t === 'files') key = 'files';
+  else if (superTabs.includes(t) || ['org', 'members', 'invite'].includes(t)) key = 'super';
+  const a = document.querySelector(`#sideNav a[data-key="${key}"]`);
+  if (a) a.classList.add('active');
+}
+function hideAllPanels() {
+  ['list', 'orgPanel', 'superPanel', 'filesPanel', 'dashboardPanel', 'createPanel', 'settingsPanel']
+    .forEach(k => { const el = $('#' + k); if (el) el.style.display = 'none'; });
+}
+function switchTab(t) {
+  const adminTabs = ['org','members','invite','allshares','stats','dashboard','users','audit'];
+  const crumb = $('#pageCrumb');
+  const crumbMap = { create:'创建分享', mine:'我的分享', files:'文件管理', settings:'设置', dashboard:'数据概览', org:'全店分享', members:'全店分享', invite:'全店分享', stores:'门店管理' };
+  const crumbText = crumbMap[t] || (adminTabs.includes(t) ? '管理后台' : '工作台');
+  if (crumb) crumb.textContent = crumbText;
+  document.title = '安全分享 · ' + crumbText;
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector(`.tab[data-tab="${t}"]`);
+  if (btn) btn.classList.add('active');
+  hideAllPanels();
+  if (superTabs.includes(t)) {
+    $('#superPanel').style.display = 'block';
+    $('#superAllShares').style.display = t === 'allshares' ? 'block' : 'none';
+    $('#superStats').style.display = t === 'stats' ? 'block' : 'none';
+    $('#superUsers').style.display = t === 'users' ? 'block' : 'none';
+    $('#superAudit').style.display = t === 'audit' ? 'block' : 'none';
+    $('#superStores').style.display = t === 'stores' ? 'block' : 'none';
+    if (t === 'allshares' && !panelLoaded.allshares) { loadAllShares(); panelLoaded.allshares = true; }
+    if (t === 'stats' && !panelLoaded.stats) { loadStats(); panelLoaded.stats = true; }
+    if (t === 'users' && !panelLoaded.users) { loadUsers(); panelLoaded.users = true; }
+    if (t === 'audit' && !panelLoaded.audit) { loadAudit(); panelLoaded.audit = true; }
+    if (t === 'stores' && !panelLoaded.stores) { loadStores(); panelLoaded.stores = true; }
+  } else if (t === 'mine') {
+    $('#list').style.display = 'block';
+    if (!panelLoaded.mine) { load(); panelLoaded.mine = true; }
+  } else if (t === 'files') {
+    $('#filesPanel').style.display = 'block';
+    if (!panelLoaded.files) { loadFiles(); panelLoaded.files = true; }
+  } else if (t === 'dashboard') {
+    $('#dashboardPanel').style.display = 'block';
+    if (!panelLoaded.dashboard) { loadDashboard(); panelLoaded.dashboard = true; }
+  } else if (t === 'create') {
+    $('#createPanel').style.display = 'block';
+    applySharePrefs();
+    checkStore();
+  } else if (t === 'settings') {
+    $('#settingsPanel').style.display = 'block';
+    initSettings();
+  } else {
+    $('#orgPanel').style.display = 'block';
+    $('#orgShares').style.display = t === 'org' ? 'block' : 'none';
+    $('#orgMembers').style.display = t === 'members' ? 'block' : 'none';
+    $('#orgInvite').style.display = t === 'invite' ? 'block' : 'none';
+    if (t === 'org' && !panelLoaded.org) { loadOrgShares(); panelLoaded.org = true; }
+    if (t === 'members' && !panelLoaded.members) { loadMembers(); panelLoaded.members = true; }
+  }
+  highlightSideNav(t);
+}
+// 顶部 tab 点击
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const t = btn.dataset.tab;
+    if (location.hash !== '#' + t) history.replaceState(null, '', '#' + t);
+    switchTab(t);
+  });
+});
+// 侧边栏内链（创建分享/我的分享/文件管理/管理后台/设置）全部在 admin.html 内，无刷新切换
+document.querySelectorAll('#sideNav a[data-key]').forEach(a => {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    let t = a.dataset.key;
+    if (t === 'super') t = (meState && meState.isSuper) ? 'allshares' : 'org';
+    if (location.hash !== '#' + t) history.replaceState(null, '', '#' + t);
+    switchTab(t);
+  });
+});
+// 顶部「＋新建分享」按钮
+const btnNewShare = document.getElementById('btnNewShare');
+if (btnNewShare) btnNewShare.addEventListener('click', () => { history.replaceState(null, '', '#create'); switchTab('create'); });
+// 根据 URL hash 初始化 tab；默认 mine
+const initTab = location.hash.replace('#', '') || 'mine';
+switchTab(initTab);
+window.addEventListener('hashchange', () => switchTab(location.hash.replace('#', '') || 'mine'));
 
 function renderShares(container, shares, withOwner, own) {
   if (!shares || !shares.length) { container.innerHTML = '<div class="empty">暂无分享</div>'; return; }
@@ -280,9 +472,34 @@ async function loadMembers() {
   const r = await fetch('/api/org/members?userToken=' + encodeURIComponent(orgToken));
   const d = await r.json();
   const box = $('#orgMembers');
-  box.innerHTML = !d.members || !d.members.length ? '<div class="empty">暂无成员</div>'
-    : `<table><tr><th>邮箱</th><th>角色</th><th>加入时间</th></tr>${d.members.map(m => `<tr><td>${esc(m.email)}</td><td>${m.role === 'admin' ? '店长' : '员工'}</td><td>${new Date(m.createdAt).toLocaleString()}</td></tr>`).join('')}</table>`;
+  if (!d.members || !d.members.length) { box.innerHTML = '<div class="empty">暂无成员</div>'; return; }
+  box.innerHTML = `<p class="sub" style="margin-bottom:8px">点击任意成员可查看其分享记录与访问日志，并可直接修改其分享权限。</p>
+    <table class="vt"><tr><th>邮箱</th><th>姓名</th><th>角色</th><th>加入时间</th></tr>${d.members.map(m => `<tr class="clickable" onclick="openMemberDetail('${m.id}')" style="cursor:pointer">
+      <td>${esc(m.email)}</td><td>${esc(m.realName || '—')}</td><td>${m.role === 'admin' ? '店长' : '员工'}</td><td>${new Date(m.createdAt).toLocaleString()}</td></tr>`).join('')}</table>`;
 }
+// 店长：查看本店成员分享与日志明细
+window.openMemberDetail = async (memberId) => {
+  const r = await fetch(`/api/org/members/${memberId}/detail?userToken=` + encodeURIComponent(orgToken));
+  const d = await r.json();
+  if (d.error) { alertDialog(d.message || '无权查看'); return; }
+  const m = d.member || {};
+  const shares = (d.shares || []).map(s => `<div class="share-item" style="margin-bottom:8px">
+    <div class="meta">${esc(s.name)} · 打开 ${s.opens} 次 · 访客 ${s.viewers} 人${s.status !== 'active' ? ' · <span class="tag off">已销毁</span>' : ''}</div>
+    <div class="acts"><a class="btn ghost sm" href="${location.origin}${s.link}" target="_blank">预览</a>
+    <button class="btn ghost sm" onclick="editShare('${s.shareId}')">改权限</button>
+    <button class="btn ghost sm" onclick="showLogs('${s.shareId}')">访问记录</button></div></div>`).join('') || '<p class="sub">该成员暂无分享</p>';
+  const viewers = (d.viewers || []).map(v => `<div class="vcard"><div class="vtop"><div class="vid">查看者 <b>${esc(v.viewerToken.slice(0,8))}</b></div><div class="vdur">${fmtDur(v.durationSec)}</div></div>
+    <div class="vmeta"><span>阅读 ${v.opens} 次</span></div>
+    <div class="vsub">${esc(v.ip || '—')} · ${[v.country, v.region, v.city].filter(Boolean).join('·') || '—'}</div></div>`).join('') || '<p class="sub">暂无访客</p>';
+  const logs = (d.logs || []).map(l => `<div class="log-row">${new Date(l.createdAt).toLocaleString()} · ${esc(l.shareName)} · 事件 ${esc(l.event)}${l.progress ? ' · ' + esc(l.progress) : ''}</div>`).join('') || '<p class="sub">暂无日志</p>';
+  $('#memberModalTitle').textContent = `成员：${esc(m.realName || m.email || '')}`;
+  $('#memberModalBody').innerHTML = `
+    <div class="vsum"><div class="vsum-i"><b>${(d.shares||[]).length}</b><span>分享数</span></div><div class="vsum-i"><b>${(d.viewers||[]).length}</b><span>访客数</span></div><div class="vsum-i"><b>${(d.logs||[]).length}</b><span>日志条数</span></div></div>
+    <h3 style="margin-top:14px">分享记录</h3>${shares}
+    <h3 style="margin-top:14px">访客</h3><div class="vlist">${viewers}</div>
+    <h3 style="margin-top:14px">访问日志</h3><div class="log-list">${logs}</div>`;
+  $('#memberModal').classList.add('show');
+};
 
 async function loadStats() {
   const r = await fetch('/api/super/stats?userToken=' + encodeURIComponent(orgToken));
@@ -313,7 +530,7 @@ async function loadStats() {
     </div>`;
   const cb = $('#cleanupBtn');
   if (cb) cb.onclick = async () => {
-    if (!confirm('确定清理孤儿文件？此操作不可恢复。')) return;
+    if (!(await confirmDialog('确定清理孤儿文件？此操作不可恢复。', { danger: true }))) return;
     const rr = await fetch('/api/super/cleanup?userToken=' + encodeURIComponent(orgToken), { method: 'POST' });
     const dd = await rr.json();
     toast(dd.ok ? `已清理 ${dd.deleted} 个文件，释放 ${fmtBytes(dd.freed)}` : '清理失败');
@@ -324,6 +541,8 @@ async function loadUsers() {
   const r = await fetch('/api/super/users?userToken=' + encodeURIComponent(orgToken));
   const d = await r.json();
   if (d.error) { $('#superUsers').innerHTML = '<div class="empty">无权访问</div>'; return; }
+  await loadOrgsCache();
+  const orgOpts = (sel) => `<option value="">（无门店）</option>` + allOrgs.map(o => `<option value="${o.id}" ${o.id === sel ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
   const rows = (d.users || []).map(u => {
     const tags = [u.isSuper ? '<span class="tag on">超级管理员</span>' : '', u.role === 'admin' ? '<span class="tag on">店长</span>' : '', u.disabled ? '<span class="tag off">已禁用</span>' : ''].join(' ');
     const acts = [
@@ -332,17 +551,19 @@ async function loadUsers() {
       `<button class="btn ghost sm" onclick="userAct('${u.id}','super',${u.isSuper ? 'false' : 'true'})">${u.isSuper ? '取消超管' : '设为超管'}</button>`,
       `<button class="btn danger sm" onclick="userAct('${u.id}','delete')">删除</button>`
     ].join(' ');
-    return `<tr><td>${esc(u.email)} ${tags}</td><td>${fmtBytes(u.bytes)}</td><td>${u.shareCount}</td><td>${new Date(u.createdAt).toLocaleString()}</td><td>${acts}</td></tr>`;
-  }).join('') || '<tr><td colspan="5" class="sub">暂无用户</td></tr>';
+    return `<tr><td>${esc(u.email)} ${tags}</td><td>${fmtBytes(u.bytes)}</td><td>${u.shareCount}</td>
+      <td><select class="org-sel" onchange="assignUserOrg('${u.id}', this.value, '${u.role === 'admin' ? 'admin' : 'member'}')">${orgOpts(u.orgId)}</select></td>
+      <td>${new Date(u.createdAt).toLocaleString()}</td><td>${acts}</td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="sub">暂无用户</td></tr>';
   $('#superUsers').innerHTML = `<div class="card"><h2>注册用户（${d.users.length}）</h2>
-    <table><tr><th>邮箱</th><th>占用</th><th>分享数</th><th>注册时间</th><th>操作</th></tr>${rows}</table>
-    <p class="sub" style="margin-top:8px">禁用后该账号无法登录；删除会同时清除其所有分享与文件。</p></div>`;
+    <table class="vt"><tr><th>邮箱</th><th>占用</th><th>分享数</th><th>所属门店</th><th>注册时间</th><th>操作</th></tr>${rows}</table>
+    <p class="sub" style="margin-top:8px">禁用后该账号无法登录；删除会同时清除其所有分享与文件；在「所属门店」下拉可直接将用户分配到门店并设定角色。</p></div>`;
 }
 window.userAct = async (id, action, val) => {
   let body = null, confirmMsg = null;
   if (action === 'delete') confirmMsg = '确定删除该用户及其所有分享/文件？不可恢复！';
   else if (action === 'disable') confirmMsg = '确定禁用该账号？';
-  if (confirmMsg && !confirm(confirmMsg)) return;
+  if (confirmMsg && !(await confirmDialog(confirmMsg, { danger: true }))) return;
   if (action === 'role') body = JSON.stringify({ role: val });
   if (action === 'super') body = JSON.stringify({ super: val });
   const r = await fetch(`/api/super/user/${id}/${action}?userToken=` + encodeURIComponent(orgToken), {
@@ -352,6 +573,135 @@ window.userAct = async (id, action, val) => {
   toast(d.ok ? '操作成功' : (d.message || '操作失败'));
   loadUsers();
 };
+// ========== 门店管理（超级管理员） ==========
+let allOrgs = [];           // 门店缓存，供用户管理分配下拉复用
+let orgNameMap = {};
+async function loadOrgsCache() {
+  if (!allOrgs.length) {
+    try {
+      const r = await fetch('/api/super/orgs?userToken=' + encodeURIComponent(orgToken));
+      const d = await r.json();
+      if (d.orgs) { allOrgs = d.orgs; orgNameMap = {}; d.orgs.forEach(o => { orgNameMap[o.id] = o.name; }); }
+    } catch (e) { /* 忽略，下次重试 */ }
+  }
+  return allOrgs;
+}
+async function loadStores() {
+  const box = $('#superStores');
+  if (!box) return;
+  box.innerHTML = `<div class="card"><h2>门店管理</h2>
+    <div class="store-bar">
+      <input id="newStoreName" placeholder="输入新门店名称，如：济宁旗舰店" />
+      <button class="btn sm" id="addStoreBtn">＋ 新建门店</button>
+    </div>
+    <p class="sub" style="margin:6px 0 10px">超级管理员统一创建门店、指派店长与成员。新注册用户须由超管分配门店后才能创建分享；店长可查看本店成员的分享与日志。</p>
+    <div id="storeList"><p class="sub">加载中…</p></div>
+  </div>`;
+  const addBtn = document.getElementById('addStoreBtn');
+  if (addBtn) addBtn.onclick = async () => {
+    const name = document.getElementById('newStoreName').value.trim();
+    if (!name) return toast('请输入门店名称');
+    const r = await fetch('/api/super/org?userToken=' + encodeURIComponent(orgToken), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return toast('失败：' + (d.message || r.statusText));
+    toast('已创建门店：' + name); document.getElementById('newStoreName').value = '';
+    allOrgs = []; loadStores();
+  };
+  await renderStoreList();
+}
+async function renderStoreList() {
+  const wrap = document.getElementById('storeList');
+  if (!wrap) return;
+  wrap.innerHTML = '<p class="sub">加载中…</p>';
+  try {
+    const r = await fetch('/api/super/orgs?userToken=' + encodeURIComponent(orgToken));
+    const d = await r.json();
+    if (d.error) { wrap.innerHTML = '<div class="empty">无权访问</div>'; return; }
+    const orgs = d.orgs || [];
+    allOrgs = orgs; orgNameMap = {}; orgs.forEach(o => { orgNameMap[o.id] = o.name; });
+    if (!orgs.length) { wrap.innerHTML = '<div class="empty">还没有门店，先新建一个吧</div>'; return; }
+    wrap.innerHTML = orgs.map(o => `
+      <div class="store-card" id="store_${o.id}">
+        <div class="store-hd">
+          <div class="store-name">${esc(o.name)}</div>
+          <div class="store-meta">店长：${o.managerEmail ? esc(o.managerEmail) : '<span class="sub">未指定</span>'} · 成员 ${o.memberCount} 人</div>
+        </div>
+        <div class="store-acts">
+          <button class="btn ghost sm" onclick="renameStore('${o.id}','${esc(o.name)}')">改名</button>
+          <button class="btn ghost sm" onclick="toggleStoreMembers('${o.id}')">成员(${o.memberCount})</button>
+          <button class="btn danger sm" onclick="deleteStore('${o.id}','${esc(o.name)}')">删除门店</button>
+        </div>
+        <div class="store-members" id="storeMembers_${o.id}" style="display:none"></div>
+      </div>`).join('');
+  } catch (e) { wrap.innerHTML = '<div class="empty">加载失败</div>'; }
+}
+window.renameStore = async (id, oldName) => {
+  const name = prompt('修改门店名称', oldName);
+  if (!name || !name.trim()) return;
+  const r = await fetch('/api/super/org/' + id + '?userToken=' + encodeURIComponent(orgToken), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast('失败：' + (d.message || r.statusText));
+  toast('已改名'); allOrgs = []; renderStoreList();
+};
+window.deleteStore = async (id, name) => {
+  if (!(await confirmDialog(`确定删除门店「${name}」？\n删除前请先将该门店成员移出或分配到其他门店，删除后该门店的邀请码也会一并清除。`, { danger: true, title: '删除门店' }))) return;
+  const r = await fetch('/api/super/org/' + id + '?userToken=' + encodeURIComponent(orgToken), { method: 'DELETE' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast('失败：' + (d.message || r.statusText));
+  toast('已删除门店'); allOrgs = []; renderStoreList();
+};
+window.toggleStoreMembers = async (id) => {
+  const box = document.getElementById('storeMembers_' + id);
+  if (!box) return;
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = '<p class="sub">加载成员中…</p>';
+  try {
+    const r = await fetch('/api/super/org/' + id + '/members?userToken=' + encodeURIComponent(orgToken));
+    const d = await r.json();
+    if (d.error) { box.innerHTML = '<div class="empty">无权访问</div>'; return; }
+    const ms = d.members || [];
+    if (!ms.length) { box.innerHTML = '<p class="sub">该门店暂无成员</p>'; return; }
+    box.innerHTML = `<table class="vt"><tr><th>邮箱</th><th>姓名</th><th>角色</th><th>操作</th></tr>${ms.map(m => `
+      <tr>
+        <td>${esc(m.email)} ${m.isSuper ? '<span class="tag on">超管</span>' : ''}</td>
+        <td>${esc(m.realName || '—')}</td>
+        <td>${m.role === 'admin' ? '店长' : '员工'}</td>
+        <td class="acts-cell">
+          ${m.role === 'admin'
+            ? `<button class="btn ghost sm" onclick="assignUserOrg('${m.id}','${id}','member')">降为员工</button>`
+            : `<button class="btn ghost sm" onclick="assignUserOrg('${m.id}','${id}','admin')">设为店长</button>`}
+          <button class="btn danger sm" onclick="assignUserOrg('${m.id}','','member')">移出门店</button>
+        </td>
+      </tr>`).join('')}</table>`;
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败</div>'; }
+};
+window.assignUserOrg = async (userId, orgId, role) => {
+  const r = await fetch(`/api/super/user/${userId}/org?userToken=` + encodeURIComponent(orgToken), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orgId: orgId || '', role: role || 'member' })
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return toast('失败：' + (d.message || r.statusText));
+  toast('已更新归属');
+  allOrgs = [];
+  if ($('#superStores').style.display !== 'none') renderStoreList();
+  if ($('#superUsers').style.display !== 'none') loadUsers();
+};
+// 无门店校验：未归属门店时禁用创建分享并提示
+function checkStore() {
+  const ns = $('#noStoreNotice');
+  const btn = $('#shareBtn');
+  if (meState && !meState.orgId) {
+    if (ns) ns.style.display = 'block';
+    if (btn) btn.disabled = true;
+    return false;
+  }
+  if (ns) ns.style.display = 'none';
+  if (btn) btn.disabled = false;
+  return true;
+}
+
 // 操作日志中文渲染辅助
 const AUDIT_ACTIONS = {
   create_share: '创建分享', destroy_share: '删除分享', restore_share: '恢复分享',
@@ -493,66 +843,233 @@ function fmtBytes(n) {
 initOrg();
 
 // ---------- 文件管理 ----------
+let lastFiles = [];          // 服务端返回的文件缓存，搜索/排序在客户端完成
+let fileMap = {};            // fileId -> { name }，供菜单动作取文件名，避免拼接转义问题
+let fileSort = { key: 'createdAt', dir: 'desc' };
+let selectedFileIds = new Set();
+let renameTargetId = null;
+
 async function loadFiles() {
   const box = $('#filesPanel');
   if (!box) return;
   box.innerHTML = `<div class="card"><h2>文件管理</h2>
     <div class="audit-bar">
+      <div class="ab grow"><label>搜索文件名</label><input id="fileSearch" placeholder="输入关键词过滤当前列表" /></div>
       <div class="ab grow"><label>按人员筛选（仅超管）</label><input id="fileOwner" placeholder="输入邮箱关键词，如 309953160" ${!isSuperNow() ? 'disabled' : ''} /></div>
       <div class="ab-acts"><button class="btn sm" id="fileRefresh">刷新</button></div>
     </div>
-    <div id="fileGrid" class="card-grid"></div>
-    <p class="sub" style="margin-top:10px">说明：替换文件会覆盖原文件内容，但<b>分享链接保持不变</b>，客户始终看到最新文件；仅当文件未被任何分享引用时方可删除。</p>
+    <div class="file-batchbar" id="fileBatchBar" style="display:none">
+      <span id="fileSelCount" class="sub">已选 0 项</span>
+      <button class="btn danger sm" id="fileBatchDelete">批量删除</button>
+      <button class="btn ghost sm" id="fileClearSel">取消选择</button>
+    </div>
+    <div id="fileGrid"></div>
+    <p class="sub" style="margin-top:10px">说明：替换文件会覆盖原文件内容，但<b>分享链接保持不变</b>，客户始终看到最新文件；仅当文件未被任何生效分享引用时方可删除。可勾选多行批量删除、点击列名排序、用上方搜索框过滤。</p>
   </div>`;
+  const search = document.getElementById('fileSearch');
+  search.addEventListener('input', () => renderFileGrid());
   const ownerInput = document.getElementById('fileOwner');
-  if (ownerInput) ownerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderFileGrid(); });
-  document.getElementById('fileRefresh').onclick = renderFileGrid;
-  await renderFileGrid();
+  if (ownerInput) ownerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderFileGrid(true); });
+  document.getElementById('fileRefresh').onclick = () => renderFileGrid(true);
+  document.getElementById('fileBatchDelete').onclick = batchDeleteFiles;
+  document.getElementById('fileClearSel').onclick = () => { selectedFileIds.clear(); renderFileGrid(); };
+  await renderFileGrid(true);
 }
-async function renderFileGrid() {
+async function renderFileGrid(fetchFirst) {
   const grid = document.getElementById('fileGrid');
   if (!grid) return;
-  grid.innerHTML = '<p class="sub">加载中…</p>';
-  let url = '/api/files?userToken=' + encodeURIComponent(orgToken);
-  if (isSuperNow()) {
-    url += '&scope=all';
-    const owner = document.getElementById('fileOwner');
-    if (owner && owner.value.trim()) url += '&owner=' + encodeURIComponent(owner.value.trim());
+  if (fetchFirst) {
+    grid.innerHTML = '<p class="sub">加载中…</p>';
+    let url = '/api/files?userToken=' + encodeURIComponent(orgToken);
+    if (isSuperNow()) {
+      url += '&scope=all';
+      const owner = document.getElementById('fileOwner');
+      if (owner && owner.value.trim()) url += '&owner=' + encodeURIComponent(owner.value.trim());
+    }
+    try {
+      const r = await fetch(url); const d = await r.json();
+      if (d.error) { grid.innerHTML = '<div class="empty">无权访问</div>'; return; }
+      lastFiles = d.files || [];
+    } catch (e) { grid.innerHTML = '<div class="empty">加载失败</div>'; return; }
   }
-  try {
-    const r = await fetch(url); const d = await r.json();
-    if (d.error) { grid.innerHTML = '<div class="empty">无权访问</div>'; return; }
-    const files = d.files || [];
-    if (!files.length) { grid.innerHTML = '<div class="empty">暂无文件</div>'; return; }
-    grid.innerHTML = files.map(f => {
-      const ic = f.kind === 'pdf' ? '📕' : f.kind === 'image' ? '🖼️' : f.kind === 'docx' ? '📘' : '📄';
-      const ownerLine = f.ownerEmail ? `<div class="meta">归属：${esc(f.ownerEmail)}</div>` : '';
-      const shareLine = f.shareCount > 0 ? `<div class="meta">被 ${f.shareCount} 个分享引用${f.shareName ? ' · 《' + esc(f.shareName) + '》' : ''}</div>` : '<div class="meta off">未分享（孤儿文件）</div>';
-      return `<div class="file-card">
-        <div class="hd"><span class="fic">${ic}</span><div class="nm" title="${esc(f.name)}">${esc(f.name)}</div></div>
-        <div class="meta">${fmtBytes(f.size)} · ${new Date(f.createdAt).toLocaleDateString()}</div>
-        ${shareLine}${ownerLine}
-        <div class="acts">
-          <button class="btn ghost sm" onclick="replaceFile('${f.fileId}')">替换文件</button>
-          <button class="btn danger sm" onclick="deleteFile('${f.fileId}')">删除</button>
+  // 客户端搜索 + 排序（不回源，体验更顺滑）
+  const q = (document.getElementById('fileSearch') ? document.getElementById('fileSearch').value : '').trim().toLowerCase();
+  let rows = lastFiles.filter(f => !q || (f.name || '').toLowerCase().includes(q));
+  const { key, dir } = fileSort;
+  rows = rows.slice().sort((a, b) => {
+    let av, bv;
+    if (key === 'name') { av = (a.name || '').toLowerCase(); bv = (b.name || '').toLowerCase(); }
+    else if (key === 'size') { av = Number(a.size) || 0; bv = Number(b.size) || 0; }
+    else { av = Number(a.createdAt) || 0; bv = Number(b.createdAt) || 0; }
+    if (av < bv) return dir === 'asc' ? -1 : 1;
+    if (av > bv) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  fileMap = {};
+  rows.forEach(f => { fileMap[f.fileId] = { name: f.name, shareId: f.shareId || null }; });
+  if (!rows.length) { grid.innerHTML = '<div class="empty">' + (q ? '无匹配文件' : '暂无文件') + '</div>'; updateBatchBar(); return; }
+  const superCol = isSuperNow() ? '<th>归属</th>' : '';
+  const arrow = (k) => fileSort.key === k ? (fileSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  const head = `<th class="c-sel"><input type="checkbox" id="fileSelAll" title="全选" /></th>
+    <th class="sortable" data-key="name">文件名${arrow('name')}</th>
+    <th class="sortable" data-key="size">大小${arrow('size')}</th>
+    <th class="sortable" data-key="createdAt">上传时间${arrow('createdAt')}</th>
+    <th>引用情况</th>${superCol}<th>操作</th>`;
+  const body = rows.map(f => {
+    const ic = f.kind === 'pdf' ? '📕' : f.kind === 'image' ? '🖼️' : f.kind === 'docx' ? '📘' : '📄';
+    const shareCell = f.shareCount > 0
+      ? `被 ${f.shareCount} 个分享引用${f.shareName ? '<br>《' + esc(f.shareName) + '》' : ''}`
+      : '<span class="danger">未分享（孤儿文件）</span>';
+    const ownerCell = f.ownerEmail ? esc(f.ownerEmail) : '';
+    const checked = selectedFileIds.has(f.fileId) ? 'checked' : '';
+    const menuId = 'fm_' + f.fileId;
+    return `<tr data-fid="${f.fileId}">
+      <td class="c-sel"><input type="checkbox" class="file-chk" data-fid="${f.fileId}" ${checked} /></td>
+      <td class="fn"><span class="fic">${ic}</span>${esc(f.name)}</td>
+      <td>${fmtBytes(f.size)}</td>
+      <td>${new Date(f.createdAt).toLocaleDateString()}</td>
+      <td>${shareCell}</td>
+      ${superCol ? `<td>${ownerCell}</td>` : ''}
+      <td class="acts-cell">
+        <div class="row-menu">
+          <button class="btn ghost sm menu-btn" onclick="toggleRowMenu(event,'${menuId}')">更多 ▾</button>
+          <div class="menu-list" id="${menuId}">
+            <button onclick="renameFile('${f.fileId}')">重命名</button>
+            <button onclick="downloadFile('${f.fileId}')">下载</button>
+            <button onclick="previewFile('${f.fileId}')">预览</button>
+            <button onclick="shareFromFile('${f.fileId}')">一键分享</button>
+            <button onclick="replaceFile('${f.fileId}')">替换文件</button>
+            <button class="danger" onclick="deleteFile('${f.fileId}')">删除</button>
+          </div>
         </div>
-      </div>`;
-    }).join('');
-  } catch (e) { grid.innerHTML = '<div class="empty">加载失败</div>'; }
+      </td>
+    </tr>`;
+  }).join('');
+  grid.innerHTML = `<table class="vt file-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  grid.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
+    const k = th.dataset.key;
+    if (fileSort.key === k) fileSort.dir = fileSort.dir === 'asc' ? 'desc' : 'asc';
+    else { fileSort.key = k; fileSort.dir = 'asc'; }
+    renderFileGrid();
+  });
+  const selAll = document.getElementById('fileSelAll');
+  if (selAll) {
+    selAll.checked = rows.length > 0 && rows.every(f => selectedFileIds.has(f.fileId));
+    selAll.onchange = () => { rows.forEach(f => { if (selAll.checked) selectedFileIds.add(f.fileId); else selectedFileIds.delete(f.fileId); }); renderFileGrid(); };
+  }
+  grid.querySelectorAll('.file-chk').forEach(c => c.onchange = () => {
+    if (c.checked) selectedFileIds.add(c.dataset.fid); else selectedFileIds.delete(c.dataset.fid);
+    const sa = document.getElementById('fileSelAll'); if (sa) sa.checked = rows.length > 0 && rows.every(f => selectedFileIds.has(f.fileId));
+    updateBatchBar();
+  });
+  updateBatchBar();
+}
+function updateBatchBar() {
+  const bar = document.getElementById('fileBatchBar');
+  if (!bar) return;
+  const n = selectedFileIds.size;
+  bar.style.display = n > 0 ? 'flex' : 'none';
+  const cnt = document.getElementById('fileSelCount');
+  if (cnt) cnt.textContent = '已选 ' + n + ' 项';
 }
 function isSuperNow() {
   // 通过超管专属 tab 是否可见判断当前会话是否为超管
   const t = document.getElementById('tabUsers');
   return !!(t && t.style.display !== 'none');
 }
+window.toggleRowMenu = (e, id) => {
+  e.stopPropagation();
+  document.querySelectorAll('.menu-list.open').forEach(m => { if (m.id !== id) m.classList.remove('open'); });
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+};
+document.addEventListener('click', () => {
+  document.querySelectorAll('.menu-list.open').forEach(m => m.classList.remove('open'));
+});
+window.renameFile = (fileId) => {
+  renameTargetId = fileId;
+  document.getElementById('renameInput').value = (fileMap[fileId] && fileMap[fileId].name) || '';
+  document.getElementById('renameModal').classList.add('show');
+  setTimeout(() => { const i = document.getElementById('renameInput'); if (i) i.focus(); }, 50);
+};
+window.saveRename = async () => {
+  if (!renameTargetId) return;
+  const name = document.getElementById('renameInput').value.trim();
+  if (!name) { toast('文件名不能为空'); return; }
+  try {
+    const r = await fetch('/api/files/' + renameTargetId + '?userToken=' + encodeURIComponent(orgToken), {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.message || d.error || ('重命名失败 HTTP ' + r.status));
+    toast('✅ 已重命名');
+    const f = lastFiles.find(x => x.fileId === renameTargetId); if (f) { f.name = name; f.originalName = name; }
+    document.getElementById('renameModal').classList.remove('show');
+    renderFileGrid();
+  } catch (e) { toast('失败：' + e.message); }
+};
+window.downloadFile = (fileId) => {
+  const a = document.createElement('a');
+  a.href = '/api/files/' + fileId + '/download?userToken=' + encodeURIComponent(orgToken);
+  a.download = (fileMap[fileId] && fileMap[fileId].name) || 'file';
+  document.body.appendChild(a); a.click(); a.remove();
+};
+window.previewFile = (fileId) => {
+  const m = fileMap[fileId];
+  // 有生效分享时直接打开专业文档查看器（可正确渲染 PDF/图片/源文件预览）；
+  // 孤儿文件（无分享）才回退到原始预览端点。
+  if (m && m.shareId) { window.open('/viewer.html?share=' + m.shareId, '_blank'); return; }
+  window.open('/api/files/' + fileId + '/preview?userToken=' + encodeURIComponent(orgToken), '_blank');
+};
+window.shareFromFile = async (fileId) => {
+  try {
+    const r = await fetch('/api/files/' + fileId + '/share?userToken=' + encodeURIComponent(orgToken), { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.message || d.error || ('创建失败 HTTP ' + r.status));
+    showShareResult(d);
+  } catch (e) { toast('失败：' + e.message); }
+};
+function showShareResult(d) {
+  const body = document.getElementById('shareResultBody');
+  const tip = d.reused ? '该文件已有生效分享，已直接复用其链接（未重复创建）：' : '已从该文件创建分享：';
+  body.innerHTML = `<p class="sub">${esc(tip)}</p>
+    <div class="share-link-row"><input id="srLink" readonly value="${esc(d.link)}" /><button class="btn ghost sm" onclick="copyLink('${esc(d.link)}')">复制</button></div>
+    ${d.qr ? `<img class="sr-qr" src="${d.qr}" alt="二维码" />` : ''}
+    <p class="sub" style="margin-top:8px">分享 ID：${esc(d.shareId)}</p>`;
+  document.getElementById('shareResultModal').classList.add('show');
+}
+window.batchDeleteFiles = async () => {
+  const ids = Array.from(selectedFileIds);
+  if (!ids.length) return;
+  if (!(await confirmDialog('确定删除选中的 ' + ids.length + ' 个文件？仅未被生效分享引用的会被删除，被引用的会跳过。', { danger: true }))) return;
+  try {
+    const r = await fetch('/api/files/batch-delete?userToken=' + encodeURIComponent(orgToken), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.message || d.error || ('批量删除失败 HTTP ' + r.status));
+    selectedFileIds.clear();
+    let msg = '✅ 已删除 ' + (d.deleted || 0) + ' 个';
+    if (d.failedCount) msg += '，' + d.failedCount + ' 个因被分享引用而跳过';
+    toast(msg);
+    // 乐观更新：仅移除后端实际删除的（d.ok 列表），被引用的保留，不回源
+    const okIds = new Set((d.ok || []));
+    lastFiles = lastFiles.filter(f => !okIds.has(f.fileId));
+    renderFileGrid();
+  } catch (e) { toast('失败：' + e.message); }
+};
 window.replaceFile = (fileId) => {
   const inp = document.getElementById('replaceFileInput');
   inp.value = '';
   inp.onchange = async () => {
     const file = inp.files[0];
     if (!file) return;
-    if (!confirm('确定用「' + file.name + '」替换该文件？分享链接保持不变，客户将看到新文件。')) { inp.onchange = null; return; }
-    const btn = toast('正在替换…');
+    if (detectKind(file) === 'download') {
+      toast('不支持的文件格式，无法替换：仅支持 PDF、Word(.docx)、常见图片与设计源文件(PSD/AI/CDR 等)');
+      inp.onchange = null; return;
+    }
+    if (!(await confirmDialog('确定用「' + file.name + '」替换该文件？分享链接保持不变，客户将看到新文件。'))) { inp.onchange = null; return; }
+    toast('正在替换…');
     try {
       const buf = await file.arrayBuffer();
       const up = await fetch('/api/files/' + fileId + '/replace?userToken=' + encodeURIComponent(orgToken) + '&name=' + encodeURIComponent(file.name) + '&mime=' + encodeURIComponent(file.type || 'application/octet-stream'), {
@@ -568,16 +1085,21 @@ window.replaceFile = (fileId) => {
   inp.click();
 };
 window.deleteFile = async (fileId) => {
-  if (!confirm('确定删除该文件？')) return;
+  if (!(await confirmDialog('确定删除该文件？', { danger: true }))) return;
   try {
     const r = await fetch('/api/files/' + fileId + '?userToken=' + encodeURIComponent(orgToken), { method: 'DELETE' });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) {
       if (d.error === 'file_in_use' && d.shares) {
-        alert('该文件仍被以下分享引用，请先处理这些分享：\n' + d.shares.map(s => s.name).join('\n'));
+        await alertDialog('该文件仍被以下分享引用，请先处理这些分享：\n' + d.shares.map(s => s.name).join('\n'));
       } else throw new Error(d.message || d.error || ('删除失败 HTTP ' + r.status));
-    } else toast('✅ 已删除');
-    renderFileGrid();
+    } else {
+      toast('✅ 已删除');
+      // 乐观更新：从本地缓存移除并重渲染，不回源
+      lastFiles = lastFiles.filter(f => f.fileId !== fileId);
+      selectedFileIds.delete(fileId);
+      renderFileGrid();
+    }
   } catch (e) { toast('失败：' + e.message); }
 };
 
@@ -612,5 +1134,412 @@ function loadDashboard() {
         </div>`;
     })
     .catch(() => { $('#dashBody').innerHTML = '<div class="empty">加载失败</div>'; });
+}
+
+// ========== 创建分享（原 app.js 迁入，单页内无刷新） ==========
+const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB';
+let selectedFile = null;
+
+function requireLogin() {
+  if (localStorage.getItem('userToken')) return true;
+  if (window.openLoginModal) window.openLoginModal();
+  return false;
+}
+
+const drop = $('#drop'), fileInput = $('#file');
+if (drop) drop.addEventListener('click', () => { if (!requireLogin()) return; fileInput.click(); });
+if (drop) drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('hot'); });
+if (drop) drop.addEventListener('dragleave', () => drop.classList.remove('hot'));
+if (drop) drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('hot'); if (!requireLogin()) return; if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
+if (fileInput) fileInput.addEventListener('change', () => {
+  if (!fileInput.files[0]) return;
+  if (!requireLogin()) { fileInput.value = ''; return; }
+  setFile(fileInput.files[0]);
+});
+
+function setFile(f) {
+  // 不支持的格式：选择即拦截，不上传
+  if (detectKind(f) === 'download') {
+    toast('不支持的文件格式，仅支持 PDF、Word(.docx)、常见图片(PNG/JPG/GIF/WEBP/BMP) 与设计源文件(PSD/AI/CDR 等)');
+    selectedFile = null;
+    if (fileInput) fileInput.value = '';
+    $('#fileinfo').style.display = 'none';
+    return;
+  }
+  selectedFile = f;
+  const ic = /\.pdf$/i.test(f.name) ? '📕' : /\.docx?$/i.test(f.name) ? '📘' : /^image\//.test(f.type) ? '🖼️' : '📄';
+  $('#fiIc').textContent = ic; $('#fiNm').textContent = f.name;
+  const isSource = /\.(psd|psb|ai|cdr|eps|indd|tif|tiff|svg|raw|cr2|nef|arw|webp)$/i.test(f.name);
+  $('#fiSz').textContent = fmtSize(f.size) + (isSource ? ' · 上传后将生成在线预览' : '');
+  $('#fileinfo').style.display = 'flex';
+  const fp = $('#fileProgress'); if (fp) fp.style.display = 'none';
+  const fpBar = $('#fpBar'); if (fpBar) fpBar.style.width = '0%';
+  const fpPct = $('#fpPct'); if (fpPct) fpPct.textContent = '0%';
+  const fpSize = $('#fpSize'); if (fpSize) fpSize.textContent = '0 MB / 0 MB';
+  if (!$('#name').value) $('#name').value = f.name.replace(/\.[^.]+$/, '');
+  applyRestrictionVisibility(detectKind(f));
+}
+
+function detectKind(f) {
+  const ext = '.' + (f.name.split('.').pop().toLowerCase());
+  const mime = f.type || '';
+  if (mime === 'application/pdf' || ext === '.pdf') return 'pdf';
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext) || mime.startsWith('image/')) return 'image';
+  if (ext === '.docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+  if (/\.(psd|psb|ai|cdr|eps|indd|tif|tiff|svg|raw|cr2|nef|arw|webp)$/i.test(ext)) return 'source';
+  return 'download';
+}
+function applyRestrictionVisibility(kind) {
+  const isDoc = (kind === 'pdf' || kind === 'docx');
+  const isImage = (kind === 'image');
+  document.querySelectorAll('.rest-doc').forEach(e => e.classList.toggle('hidden', !isDoc));
+  document.querySelectorAll('.rest-shot').forEach(e => e.classList.toggle('hidden', !(isDoc || isImage)));
+}
+
+// 默认分享参数：从本地缓存（设置页保存）应用到表单
+function applySharePrefs() {
+  try {
+    const raw = localStorage.getItem('sharePrefs');
+    if (!raw) return;
+    const p = JSON.parse(raw);
+    if (p.expire !== undefined) {
+      const v = String(p.expire);
+      const allowed = ['1','3','7','30','0','custom'];
+      setExpire(allowed.includes(v) ? v : '7', p.expireCustom);
+    }
+    if (p.watermark !== undefined) { const w = $('#watermark'); if (w) w.value = p.watermark; }
+    if (p.copy !== undefined) { const c = $('#rCopy'); if (c) c.checked = !!p.copy; }
+    if (p.print !== undefined) { const pr = $('#rPrint'); if (pr) pr.checked = !!p.print; }
+    if (p.download !== undefined) { const d = $('#rDownload'); if (d) d.checked = !!p.download; }
+    if (p.accessCode !== undefined) { const cd = $('#code'); if (cd) cd.value = p.accessCode || ''; }
+    if (p.authMode !== undefined) {
+      const v = String(p.authMode || 'open');
+      document.querySelectorAll('#authChips button').forEach(b => b.classList.toggle('active', b.dataset.val === v));
+    }
+    if (p.maxViewers !== undefined) { const mv = $('#maxViewers'); if (mv) mv.value = String(p.maxViewers || 0); }
+    if (p.maxViews !== undefined) { const mx = $('#maxViews'); if (mx) mx.value = String(p.maxViews || 0); }
+    if (p.duration !== undefined) { const du = $('#duration'); if (du) du.value = String(p.duration || 0); }
+    if (p.screenshot !== undefined) { const ss = $('#rScreenshot'); if (ss) ss.checked = !!p.screenshot; }
+    const pe = $('#previewEnabled'), pp = $('#previewPages'), pwp = $('#protectPassword');
+    const hasPreview = !!(p.previewPages && parseInt(p.previewPages, 10) > 0);
+    if (pe) pe.checked = hasPreview;
+    if (pp) pp.value = String(hasPreview ? (p.previewPages || 2) : 2);
+    if (pwp) pwp.value = p.protectPassword || '';
+    if (pe) pe.dispatchEvent(new Event('change'));
+  } catch (e) {}
+}
+async function loadAndApplyPrefs() {
+  const tk = localStorage.getItem('userToken');
+  if (!tk) return;
+  try {
+    const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(tk), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.prefs && typeof d.prefs === 'object') {
+      try { localStorage.setItem('sharePrefs', JSON.stringify(d.prefs)); } catch (e) {}
+    }
+  } catch (e) {}
+  applySharePrefs();
+}
+window.applySharePrefs = applySharePrefs;
+
+const fiClear = document.getElementById('fiClear');
+if (fiClear) fiClear.addEventListener('click', (e) => { e.preventDefault(); selectedFile = null; if (fileInput) fileInput.value = ''; $('#fileinfo').style.display = 'none'; });
+
+async function uploadAndShare() {
+  if (!selectedFile) return toast('请先选择文件');
+  if (!requireLogin()) return;
+  if (!checkStore()) { toast('您尚未归属任何门店，无法创建分享，请联系管理员分配门店'); return; }
+  const btn = $('#shareBtn');
+  const fp = $('#fileProgress'), fpBar = $('#fpBar'), fpPct = $('#fpPct'), fpSize = $('#fpSize');
+  btn.disabled = true; btn.textContent = '上传中…';
+  if (fp) fp.style.display = 'block';
+  if (fpBar) fpBar.style.width = '0%';
+  if (fpPct) fpPct.textContent = '0%';
+  if (fpSize) fpSize.textContent = '0 MB / ' + fmtSize(selectedFile.size);
+  const userToken = localStorage.getItem('userToken');
+  try {
+    const upRes = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const url = '/api/upload?userToken=' + encodeURIComponent(userToken || '') + '&name=' + encodeURIComponent(selectedFile.name) + '&mime=' + encodeURIComponent(selectedFile.type || 'application/octet-stream');
+      xhr.open('POST', url, true);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const p = Math.min(100, Math.round((e.loaded / e.total) * 100));
+          if (fpBar) fpBar.style.width = p + '%';
+          if (fpPct) fpPct.textContent = p + '%';
+          if (fpSize) fpSize.textContent = fmtSize(e.loaded) + ' / ' + fmtSize(e.total);
+        } else {
+          if (fpPct) fpPct.textContent = '…';
+          if (fpSize) fpSize.textContent = '已上传 ' + fmtSize(e.loaded);
+        }
+      };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+        else reject(new Error((body && body.message) || body.error || ('上传失败（HTTP ' + xhr.status + '）')));
+      };
+      xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+      xhr.onabort = () => reject(new Error('上传已取消'));
+      xhr.send(selectedFile);
+    });
+
+    const activeChip = document.querySelector('#expireChips button.active, #expireCustomBtn.active');
+    const val = activeChip ? activeChip.dataset.val : '7';
+    let expiresAt = null;
+    if (val === '0') {
+      expiresAt = null;
+    } else if (val === 'custom') {
+      const ec = $('#expireCustom');
+      const dt = ec && ec.value ? new Date(ec.value).getTime() : 0;
+      expiresAt = dt > Date.now() ? dt : null;
+    } else {
+      const days = parseInt(val, 10) || 0;
+      if (days > 0) expiresAt = Date.now() + days * 86400000;
+    }
+    const previewEnabled = $('#previewEnabled') && $('#previewEnabled').checked;
+    const previewPages = previewEnabled ? (parseInt($('#previewPages').value, 10) || 2) : 0;
+    const protectPassword = previewEnabled ? ($('#protectPassword').value.trim() || null) : null;
+    const extra = { previewPages };
+    if (protectPassword) extra.protectPassword = protectPassword;
+    const settings = {
+      name: $('#name').value || selectedFile.name,
+      accessCode: $('#code').value.trim() || null,
+      maxViewers: parseInt($('#maxViewers').value, 10) || 0,
+      maxViews: parseInt($('#maxViews').value, 10) || 0,
+      durationSec: (parseInt($('#duration').value, 10) || 0) * 60,
+      authMode: (document.querySelector('#authChips button.active') || { dataset: { val: 'open' } }).dataset.val,
+      watermark: $('#watermark').value.trim(),
+      disableCopy: $('#rCopy').checked, disablePrint: $('#rPrint').checked,
+      disableDownload: $('#rDownload').checked, disableScreenshot: $('#rScreenshot').checked,
+      extra,
+      expiresAt
+    };
+    const sh = await fetch('/api/share', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileId: upRes.fileId, settings, userToken: userToken || null })
+    });
+    const shRes = await sh.json().catch(() => ({}));
+    if (!sh.ok) throw new Error((shRes && shRes.message) || shRes.error || ('创建分享失败（HTTP ' + sh.status + '）'));
+
+    $('#qrImg').src = shRes.qr;
+    $('#linkInput').value = location.origin + '/viewer.html?share=' + shRes.shareId;
+    $('#openViewer').href = $('#linkInput').value;
+    // 单页内：成功后可直接切到「我的分享」查看，不跳转独立页面
+    $('#openAdmin').style.display = '';
+    $('#openAdmin').onclick = () => { history.replaceState(null, '', '#mine'); switchTab('mine'); };
+    $('#result').classList.add('show');
+
+    // 成功后给出明确反馈：若设置了预览密码，提醒访客需输入后续密码
+    if (extra.previewPages && extra.protectPassword) {
+      toast('已创建分享，访客预览超过 ' + extra.previewPages + ' 页后需输入密码查看');
+    } else {
+      toast('分享创建成功');
+    }
+
+    // 乐观更新：把新分享插入本地缓存，切到「我的分享」即时可见（无需重拉整表）
+    const newShare = {
+      shareId: shRes.shareId, name: settings.name, kind: detectKind(selectedFile),
+      opens: 0, viewers: 0, expiresAt: settings.expiresAt, maxViewers: settings.maxViewers,
+      status: 'active', authMode: settings.authMode, accessCode: settings.accessCode || '',
+      restrictions: { copy: settings.disableCopy, print: settings.disablePrint, download: settings.disableDownload, screenshot: settings.disableScreenshot },
+      extra: extra,
+      link: '/viewer.html?share=' + shRes.shareId, fileId: upRes.fileId
+    };
+    mineShares.unshift(newShare);
+    panelLoaded.mine = true;
+    renderMineGrid();
+
+    // 重置创建表单
+    selectedFile = null; if (fileInput) fileInput.value = '';
+    $('#fileinfo').style.display = 'none';
+    if (fp) fp.style.display = 'none';
+  } catch (e) {
+    toast('失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '立即分享';
+    if (fp) fp.style.display = 'none';
+    if (fpBar) fpBar.style.width = '0%';
+    if (fpPct) fpPct.textContent = '0%';
+  }
+}
+const shareBtn = document.getElementById('shareBtn');
+if (shareBtn) shareBtn.addEventListener('click', uploadAndShare);
+
+// 有效期：预设胶囊 + 始终可点的日期
+function setExpire(val, dateStr) {
+  const chips = document.querySelectorAll('#expireChips button, #expireCustomBtn');
+  chips.forEach(b => b.classList.toggle('active', b.dataset.val === val));
+  const ec = document.getElementById('expireCustom');
+  const hint = document.getElementById('expireHint');
+  const row = document.getElementById('expireCustomRow');
+  if (val === '0') {
+    // 永久：隐藏日期行，卡片不撑大
+    if (ec) { ec.value = ''; ec.disabled = true; }
+    if (row) row.style.display = 'none';
+  } else if (val === 'custom') {
+    if (row) row.style.display = 'flex';
+    if (ec) {
+      ec.disabled = false;
+      if (dateStr) ec.value = dateStr;
+      else if (!ec.value) {
+        const d = new Date(Date.now() + 7 * 86400000);
+        ec.value = d.toISOString().slice(0, 16);
+      }
+    }
+    if (hint && ec) {
+      const dt = ec.value ? new Date(ec.value).getTime() : 0;
+      hint.textContent = dt > Date.now() ? ('将于 ' + new Date(ec.value).toLocaleString() + ' 到期') : '请选择自定义到期时间';
+      hint.classList.toggle('empty', !(dt > Date.now()));
+    }
+  } else {
+    if (row) row.style.display = 'flex';
+    const days = parseInt(val, 10);
+    const d = new Date(Date.now() + days * 86400000);
+    if (ec) { ec.value = d.toISOString().slice(0, 16); ec.disabled = false; }
+    if (hint) { hint.textContent = '将于 ' + d.toLocaleString() + ' 到期'; hint.classList.remove('empty'); }
+  }
+}
+
+(function initExpire() {
+  const chips = document.querySelectorAll('#expireChips button, #expireCustomBtn');
+  chips.forEach(b => b.addEventListener('click', () => setExpire(b.dataset.val)));
+  const ec = document.getElementById('expireCustom');
+  if (ec) ec.addEventListener('change', () => {
+    const active = document.querySelector('#expireChips button.active, #expireCustomBtn.active');
+    const val = active ? active.dataset.val : 'custom';
+    // 手动改了日期，视为自定义
+    setExpire('custom', ec.value);
+  });
+  setExpire('7');
+})();
+
+// 验证方式：单选胶囊
+(function initAuth() {
+  const chips = document.querySelectorAll('#authChips button');
+  chips.forEach(b => b.addEventListener('click', () => {
+    chips.forEach(x => x.classList.toggle('active', x === b));
+  }));
+})();
+const previewEnabled = document.getElementById('previewEnabled');
+if (previewEnabled) previewEnabled.addEventListener('change', () => {
+  const pp = document.getElementById('previewPages');
+  const pwp = document.getElementById('protectPassword');
+  if (pp) pp.disabled = !previewEnabled.checked;
+  if (pwp) pwp.disabled = !previewEnabled.checked;
+});
+const copyLinkBtn = document.getElementById('copyLink');
+if (copyLinkBtn) copyLinkBtn.addEventListener('click', () => { navigator.clipboard.writeText($('#linkInput').value); toast('链接已复制'); });
+function closeResult() { $('#result').classList.remove('show'); }
+const closeResultBtn = document.getElementById('closeResult');
+if (closeResultBtn) closeResultBtn.addEventListener('click', closeResult);
+const resultModal = document.getElementById('result');
+if (resultModal) resultModal.addEventListener('click', (e) => { if (e.target === resultModal) closeResult(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && resultModal && resultModal.classList.contains('show')) closeResult(); });
+
+// ========== 设置（原 settings.js 迁入，单页内无刷新） ==========
+let settingsBound = false;
+function initSettings() {
+  const tk = localStorage.getItem('userToken');
+  if (!tk) {
+    const need = $('#setNeedLogin'); if (need) need.style.display = 'block';
+    const content = $('#setContent'); if (content) content.style.display = 'none';
+    const foot = document.querySelector('.set-foot'); if (foot) foot.style.display = 'none';
+    return;
+  }
+  const need = $('#setNeedLogin'); if (need) need.style.display = 'none';
+  const content = $('#setContent'); if (content) content.style.display = '';
+  const foot = document.querySelector('.set-foot'); if (foot) foot.style.display = '';
+  if (!settingsBound) {
+    settingsBound = true;
+    bindToggle('setOldToggle', 'setOldPw');
+    bindToggle('setNewToggle', 'setNewPw');
+    const sb = $('#setSave'); if (sb) sb.onclick = saveSettings;
+    const cc = $('#setClearCache');
+    if (cc) cc.onclick = () => {
+      try { localStorage.removeItem('sharePrefs'); ['sb-token', 'supabase.auth.token'].forEach(k => localStorage.removeItem(k)); sessionStorage.clear(); } catch (e) {}
+      toast('已清除本地缓存'); loadSettings();
+    };
+    const lo = $('#setLogout'); if (lo) lo.onclick = logout;
+  }
+  loadSettings();
+}
+function bindToggle(btnId, inpId) {
+  const inp = document.getElementById(inpId), btn = document.getElementById(btnId);
+  if (!inp || !btn) return;
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    btn.textContent = show ? '🙈' : '👁️';
+  });
+}
+const toNum = (v) => { const n = parseInt(v, 10); return isNaN(n) ? 0 : n; };
+async function loadSettings() {
+  const tk = localStorage.getItem('userToken');
+  if (!tk) return;
+  try {
+    const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(tk), { cache: 'no-store' });
+    if (!r.ok) throw new Error('not ok');
+    const d = await r.json();
+    $('#setEmail').value = d.email || '';
+    $('#setRole').value = d.isSuper ? '超级管理员' : (d.role === 'admin' ? '店长' : '成员');
+    $('#setRealName').value = d.realName || '';
+    const orgSec = $('#setOrgSec');
+    if (orgSec) { $('#setOrg').value = d.orgName || '—'; orgSec.style.display = d.orgName ? 'block' : 'none'; }
+    const DEFAULT_PREFS = { expire: '7', watermark: '', copy: true, print: true, download: true, accessCode: '', authMode: 'open', maxViewers: 0, maxViews: 0, duration: 0, screenshot: false, previewPages: 0, protectPassword: '' };
+    const p = Object.assign({}, DEFAULT_PREFS, d.prefs || {});
+    $('#setExpire').value = String(p.expire);
+    $('#setAuthMode').value = p.authMode || 'open';
+    $('#setCode').value = p.accessCode || '';
+    $('#setWatermark').value = p.watermark || '';
+    $('#setMaxViewers').value = toNum(p.maxViewers);
+    $('#setMaxViews').value = toNum(p.maxViews);
+    $('#setDuration').value = toNum(p.duration);
+    $('#setPreviewPages').value = toNum(p.previewPages);
+    $('#setCopy').checked = !!p.copy;
+    $('#setPrint').checked = !!p.print;
+    $('#setDownload').checked = !!p.download;
+    $('#setScreenshot').checked = !!p.screenshot;
+    $('#setOldPw').value = ''; $('#setNewPw').value = ''; $('#setNewPw2').value = '';
+    if (typeof window.afterLogin === 'function') window.afterLogin(d.realName || d.email);
+  } catch (e) {
+    const msg = $('#setMsg'); if (msg) msg.textContent = '读取资料失败，请刷新重试';
+  }
+}
+async function saveSettings() {
+  const tk = localStorage.getItem('userToken');
+  const msg = $('#setMsg');
+  const realName = $('#setRealName').value.trim();
+  if (!realName) { msg.textContent = '真实姓名不能为空'; return; }
+  const oldPw = $('#setOldPw').value, newPw = $('#setNewPw').value, newPw2 = $('#setNewPw2').value;
+  if ((oldPw || newPw || newPw2) && (!oldPw || !newPw || !newPw2)) { msg.textContent = '修改密码需填原密码、新密码、确认新密码三项'; return; }
+  if (newPw && newPw !== newPw2) { msg.textContent = '两次输入的新密码不一致'; return; }
+  const prefs = {
+    expire: $('#setExpire').value, authMode: $('#setAuthMode').value, accessCode: $('#setCode').value.trim(),
+    watermark: $('#setWatermark').value.trim(), maxViewers: toNum($('#setMaxViewers').value), maxViews: toNum($('#setMaxViews').value),
+    duration: toNum($('#setDuration').value), previewPages: toNum($('#setPreviewPages').value), protectPassword: $('#setProtectPassword').value.trim(),
+    copy: $('#setCopy').checked, print: $('#setPrint').checked, download: $('#setDownload').checked, screenshot: $('#setScreenshot').checked
+  };
+  const btn = $('#setSave'); btn.disabled = true;
+  try {
+    const pr = await fetch('/api/auth/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userToken: tk, realName, prefs }) });
+    const pd = await pr.json().catch(() => ({}));
+    if (!pr.ok) { msg.textContent = pd.message || pd.error || '保存失败'; btn.disabled = false; return; }
+    if (newPw) {
+      const cp = await fetch('/api/auth/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userToken: tk, oldPassword: oldPw, newPassword: newPw }) });
+      const cd = await cp.json().catch(() => ({}));
+      if (!cp.ok) { msg.textContent = cd.message || cd.error || '修改密码失败'; btn.disabled = false; return; }
+    }
+    try { localStorage.setItem('sharePrefs', JSON.stringify(prefs)); } catch (e) {}
+    if (typeof window.applySharePrefs === 'function') window.applySharePrefs();
+    msg.style.color = '#16a34a';
+    msg.textContent = '已保存' + (newPw ? '（密码已修改，其它设备已退出）' : '');
+    setTimeout(() => { msg.style.color = '#e5484d'; msg.textContent = ''; }, 2200);
+    loadSettings();
+  } catch (e) { msg.textContent = '网络错误，请重试'; }
+  finally { btn.disabled = false; }
 }
 

@@ -63,12 +63,25 @@ fileInput.addEventListener('change', () => {
 });
 
 function setFile(f) {
+  // 不支持的格式：选择即拦截，不上传
+  if (detectKind(f) === 'download') {
+    toast('不支持的文件格式，仅支持 PDF、Word(.docx)、常见图片(PNG/JPG/GIF/WEBP/BMP) 与设计源文件(PSD/AI/CDR 等)');
+    selectedFile = null;
+    if (fileInput) fileInput.value = '';
+    $('#fileinfo').style.display = 'none';
+    return;
+  }
   selectedFile = f;
   const ic = /\.pdf$/i.test(f.name) ? '📕' : /\.docx?$/i.test(f.name) ? '📘' : /^image\//.test(f.type) ? '🖼️' : '📄';
   $('#fiIc').textContent = ic; $('#fiNm').textContent = f.name;
   const isSource = /\.(psd|psb|ai|cdr|eps|indd|tif|tiff|svg|raw|cr2|nef|arw|webp)$/i.test(f.name);
   $('#fiSz').textContent = fmtSize(f.size) + (isSource ? ' · 上传后将生成在线预览' : '');
   $('#fileinfo').style.display = 'flex';
+  // 重置文件卡片内的上传进度条
+  const fp = $('#fileProgress'); if (fp) fp.style.display = 'none';
+  const fpBar = $('#fpBar'); if (fpBar) fpBar.style.width = '0%';
+  const fpPct = $('#fpPct'); if (fpPct) fpPct.textContent = '0%';
+  const fpSize = $('#fpSize'); if (fpSize) fpSize.textContent = '0 MB / 0 MB';
   if (!$('#name').value) $('#name').value = f.name.replace(/\.[^.]+$/, '');
   // 按文件类型切换可用权限选项（文档/图片类型化）
   applyRestrictionVisibility(detectKind(f));
@@ -131,16 +144,41 @@ $('#fiClear').addEventListener('click', (e) => { e.preventDefault(); selectedFil
 async function uploadAndShare() {
   if (!selectedFile) return toast('请先选择文件');
   if (!requireLogin()) return;
-  const btn = $('#shareBtn'); btn.disabled = true; btn.textContent = '正在上传并加密…';
+  const btn = $('#shareBtn');
+  const fp = $('#fileProgress'), fpBar = $('#fpBar'), fpPct = $('#fpPct'), fpSize = $('#fpSize');
+  btn.disabled = true; btn.textContent = '上传中…';
+  if (fp) fp.style.display = 'block';
+  if (fpBar) fpBar.style.width = '0%';
+  if (fpPct) fpPct.textContent = '0%';
+  if (fpSize) fpSize.textContent = '0 MB / ' + fmtSize(selectedFile.size);
   const userToken = localStorage.getItem('userToken');
   try {
-    // 1) 上传原始字节（必须登录）
-    const buf = await selectedFile.arrayBuffer();
-    const up = await fetch('/api/upload?userToken=' + encodeURIComponent(userToken || '') + '&name=' + encodeURIComponent(selectedFile.name) + '&mime=' + encodeURIComponent(selectedFile.type || 'application/octet-stream'), {
-      method: 'POST', body: buf
+    // 1) 上传原始字节（XMLHttpRequest 监听进度，实时显示在文件卡片上）
+    const upRes = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const url = '/api/upload?userToken=' + encodeURIComponent(userToken || '') + '&name=' + encodeURIComponent(selectedFile.name) + '&mime=' + encodeURIComponent(selectedFile.type || 'application/octet-stream');
+      xhr.open('POST', url, true);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const p = Math.min(100, Math.round((e.loaded / e.total) * 100));
+          if (fpBar) fpBar.style.width = p + '%';
+          if (fpPct) fpPct.textContent = p + '%';
+          if (fpSize) fpSize.textContent = fmtSize(e.loaded) + ' / ' + fmtSize(e.total);
+        } else {
+          if (fpPct) fpPct.textContent = '…';
+          if (fpSize) fpSize.textContent = '已上传 ' + fmtSize(e.loaded);
+        }
+      };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+        else reject(new Error((body && body.message) || body.error || ('上传失败（HTTP ' + xhr.status + '）')));
+      };
+      xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+      xhr.onabort = () => reject(new Error('上传已取消'));
+      xhr.send(selectedFile);
     });
-    const upRes = await up.json().catch(() => ({}));
-    if (!up.ok) throw new Error((upRes && upRes.message) || upRes.error || ('上传失败（HTTP ' + up.status + '）'));
 
     // 2) 创建分享
     const expVal = parseInt($('#expire').value, 10);
@@ -181,7 +219,11 @@ async function uploadAndShare() {
   } catch (e) {
     toast('失败：' + e.message);
   } finally {
-    btn.disabled = false; btn.textContent = '立即分享';
+    btn.disabled = false;
+    btn.textContent = '立即分享';
+    if (fp) fp.style.display = 'none';
+    if (fpBar) fpBar.style.width = '0%';
+    if (fpPct) fpPct.textContent = '0%';
   }
 }
 $('#shareBtn').addEventListener('click', uploadAndShare);

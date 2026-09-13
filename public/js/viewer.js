@@ -6,7 +6,7 @@ const params = new URLSearchParams(location.search);
 const shareId = params.get('share');
 let viewerToken = localStorage.getItem('viewerToken');
 if (!viewerToken) { viewerToken = crypto.randomUUID(); localStorage.setItem('viewerToken', viewerToken); }
-let accessToken = null, restrictions = {}, watermarkText = '', kind = '', docName = '', expiresIn = 0, sessionStart = 0, hasPreview = false, previewPages = 0;
+let accessToken = null, restrictions = {}, watermarkText = '', kind = '', docName = '', expiresIn = 0, sessionStart = 0, hasPreview = false, previewPages = 0, needProtect = false, pdfDoc = null, totalPages = 0;
 
 function shortId() { return viewerToken.slice(0, 8); }
 
@@ -31,16 +31,17 @@ function startMovingWatermark() {
 function applyRestrictions() {
   if (restrictions.copy) {
     document.body.style.userSelect = 'none';
-    document.addEventListener('copy', (e) => e.preventDefault());
-    document.addEventListener('cut', (e) => e.preventDefault());
+    document.addEventListener('copy', (e) => { e.preventDefault(); toast('该分享已禁止复制'); });
+    document.addEventListener('cut', (e) => { e.preventDefault(); toast('该分享已禁止剪切'); });
     document.addEventListener('selectstart', (e) => e.preventDefault());
   }
   if (restrictions.print) {
-    window.addEventListener('beforeprint', (e) => { document.body.innerHTML = '<h2 style="padding:40px">打印已被禁止</h2>'; });
-    document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') e.preventDefault(); });
+    // 打印：拦截并提示（beforeprint 下 body 会被替换，故用替换文案充当提示，键盘 Ctrl/Cmd+P 走 toast）
+    window.addEventListener('beforeprint', () => { document.body.innerHTML = '<h2 style="padding:40px;text-align:center">该分享已禁止打印</h2>'; });
+    document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') { e.preventDefault(); toast('该分享已禁止打印'); } });
   }
-  // 禁止右键/拖拽保存（下载/截图防护的一部分）
-  document.addEventListener('contextmenu', (e) => e.preventDefault());
+  // 禁止右键/拖拽保存（下载/截图防护的一部分）：触发时提示，而非静默拦截
+  document.addEventListener('contextmenu', (e) => { e.preventDefault(); toast('该分享已禁止下载'); });
   document.addEventListener('dragstart', (e) => e.preventDefault());
 }
 
@@ -62,6 +63,16 @@ function trackPage() {
 window.addEventListener('scroll', trackPage, { passive: true });
 window.addEventListener('beforeunload', () => report('close'));
 
+// 心跳：页面可见时每 15 秒上报一次，用于后端统计「阅读时长」（离开/最小化不计时）
+let heartbeatTimer = null;
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') report('heartbeat');
+  }, 15000);
+}
+function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } }
+
 // ---------- 时长控制 ----------
 function enforceDuration() {
   if (!expiresIn) return;
@@ -70,6 +81,7 @@ function enforceDuration() {
   setTimeout(timeout, ms);
 }
 function timeout() {
+  stopHeartbeat();
   report('timeout');
   $('#content').style.display = 'none';
   $('#gate').style.display = 'block';
@@ -88,16 +100,14 @@ async function loadMeta() {
   if (m.status !== 'active') { $('#gateTitle').textContent = '文档已下架'; showGate('<p class="sub" style="text-align:center">该文档已被分享者销毁或下架。</p>'); return false; }
   docName = m.name; kind = m.kind; restrictions = m.restrictions; watermarkText = m.watermark; hasPreview = !!m.preview;
   previewPages = (m.extra && Number(m.extra.previewPages) > 0) ? Number(m.extra.previewPages) : 0;
+  needProtect = !!(m.extra && m.extra.needProtect);
   $('#docName').textContent = docName;
-  // 右上角提示：仅显示对访客有实际影响的限制，用灰色小标签避免视觉污染
+  // 方案 B：平时不显示「禁止复制/打印/下载/截图」等限制标签（避免客户感觉被防着）；
+  // 仅在客户真正触发对应操作时（applyRestrictions / 下载按钮）弹 toast 提示。
+  // 此处只保留中性/正向信息：访问码、需授权、可在线预览。
   const hints = [];
   if (m.requiresCode) hints.push({ icon: '🔐', text: '需访问码' });
   if (m.authMode === 'approve') hints.push({ icon: '✋', text: '需授权' });
-  if (restrictions.copy) hints.push({ icon: '📋', text: '禁止复制' });
-  if (restrictions.print) hints.push({ icon: '🖨', text: '禁止打印' });
-  if (restrictions.download) hints.push({ icon: '⬇', text: '禁止下载' });
-  if (restrictions.screenshot) hints.push({ icon: '📷', text: '防截图' });
-  if (previewPages > 0) hints.push({ icon: '📄', text: `仅前 ${previewPages} 页` });
   $('#restBadge').innerHTML = hints.length
     ? hints.map(h => `<span class="vhint"><span class="vhi">${h.icon}</span><span>${h.text}</span></span>`).join('')
     : '<span class="vhint"><span class="vhi">👁</span><span>可在线预览</span></span>';
@@ -107,6 +117,8 @@ async function loadMeta() {
 // 通过鉴权后进入内容（open / wechat 确认共用）
 async function enterContent(res) {
   accessToken = res.accessToken; expiresIn = res.expiresIn; sessionStart = Date.now();
+  if (res.previewPages !== undefined) previewPages = Number(res.previewPages) || 0;
+  if (res.needProtect !== undefined) needProtect = !!res.needProtect;
   if (res.watermark) buildWatermark(res.watermark); else buildWatermark('');
   if (restrictions.screenshot) startMovingWatermark();
   applyRestrictions();
@@ -114,6 +126,7 @@ async function enterContent(res) {
   $('#content').style.display = 'block';
   await loadContent(res.kind);
   enforceDuration();
+  startHeartbeat();
 }
 
 async function requestAccess(code) {
@@ -178,6 +191,46 @@ async function loadImage(url) {
   $('#imgWrap').style.display = 'block'; $('#imgWrap').appendChild(img);
 }
 
+async function renderPdfPage(i) {
+  if (!pdfDoc) return;
+  const page = await pdfDoc.getPage(i);
+  const vp = page.getViewport({ scale: 1.4 });
+  const canvas = document.createElement('canvas');
+  canvas.dataset.page = i;
+  canvas.width = vp.width; canvas.height = vp.height;
+  $('#pages').appendChild(canvas);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+  report('progress', 'p' + i + '/' + totalPages);
+}
+function renderUnlockBox(limit, total) {
+  const box = document.createElement('div');
+  box.id = 'unlockBox';
+  box.style.cssText = 'text-align:center;padding:28px 20px;background:#f9fafc;border-top:1px dashed var(--line)';
+  box.innerHTML = `<p class="sub" style="margin:0 0 12px">已预览前 ${limit} 页，剩余 ${total - limit} 页受密码保护</p>
+    <div style="display:flex;gap:8px;justify-content:center;max-width:320px;margin:0 auto">
+      <input type="password" id="unlockPw" placeholder="请输入后续密码" style="flex:1" />
+      <button class="btn sm" id="unlockBtn">解锁</button>
+    </div>
+    <p id="unlockErr" class="sub" style="color:var(--danger);min-height:18px;margin-top:8px;margin-bottom:0"></p>`;
+  $('#pages').appendChild(box);
+  $('#unlockBtn').onclick = async () => {
+    const pw = $('#unlockPw').value.trim();
+    if (!pw) return;
+    try {
+      const r = await fetch('/api/share/' + shareId + '/unlock', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessToken, password: pw })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { $('#unlockErr').textContent = d.message || '密码错误'; return; }
+      needProtect = false;
+      box.remove();
+      for (let i = limit + 1; i <= total; i++) await renderPdfPage(i);
+    } catch (e) { $('#unlockErr').textContent = '网络错误，请重试'; }
+  };
+  $('#unlockPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#unlockBtn').click(); });
+}
+
 async function loadContent(k) {
   if (k === 'pdf') {
     const r = await fetch('/api/content/' + shareId + '?at=' + accessToken);
@@ -185,25 +238,20 @@ async function loadContent(k) {
     const buf = await r.arrayBuffer();
     if (!window.pdfjsLib) { $('#pages').innerHTML = '<p class="sub">PDF 组件加载失败（本地 PDF.js 缺失）</p>'; return; }
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    const limit = previewPages && previewPages < pdf.numPages ? previewPages : pdf.numPages;
-    for (let i = 1; i <= limit; i++) {
-      const page = await pdf.getPage(i);
-      const vp = page.getViewport({ scale: 1.4 });
-      const canvas = document.createElement('canvas');
-      canvas.dataset.page = i;
-      canvas.width = vp.width; canvas.height = vp.height;
-      $('#pages').appendChild(canvas);
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
-      report('progress', 'p' + i + '/' + pdf.numPages);
-    }
-    // 预览页数限制：未渲染的后续页不向访客展示
-    if (limit < pdf.numPages) {
-      const tip = document.createElement('div');
-      tip.className = 'sub';
-      tip.style.cssText = 'text-align:center;padding:24px;color:var(--danger);font-weight:600';
-      tip.textContent = `分享者限制仅可预览前 ${limit} 页，剩余 ${pdf.numPages - limit} 页不可查看`;
-      $('#pages').appendChild(tip);
+    pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+    totalPages = pdfDoc.numPages;
+    const limit = previewPages && previewPages < totalPages ? previewPages : totalPages;
+    for (let i = 1; i <= limit; i++) await renderPdfPage(i);
+    // 预览页数限制：未渲染的后续页暂不展示；如需密码保护则显示解锁表单
+    if (limit < totalPages) {
+      if (needProtect) renderUnlockBox(limit, totalPages);
+      else {
+        const tip = document.createElement('div');
+        tip.className = 'sub';
+        tip.style.cssText = 'text-align:center;padding:24px;color:var(--danger);font-weight:600';
+        tip.textContent = `分享者限制仅可预览前 ${limit} 页；后续 ${totalPages - limit} 页未设置查看密码，如需完整内容请联系分享者`;
+        $('#pages').appendChild(tip);
+      }
     }
     return;
   }
@@ -223,9 +271,9 @@ async function loadContent(k) {
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     $('#dlWrap').style.display = 'block';
-    $('#dlWrap').innerHTML = '<p>这是设计源文件（PSD / AI / CDR 等），当前服务器未启用在线预览转换。</p><p class="sub">请在本地设计软件中打开查看原始图层与矢量信息。</p><a class="btn" id="dlBtn">下载源文件</a>';
+    $('#dlWrap').innerHTML = '<p>这是设计源文件（PSD / AI / CDR 等），当前暂无在线预览图。</p><p class="sub">可能原因：①服务器未安装转换后端；②该文件上传于启用预览之前。重新上传即可生成预览。</p><a class="btn" id="dlBtn">下载源文件</a>';
     $('#dlBtn').onclick = () => {
-      if (restrictions.download) { toast('分享者已禁止下载'); return; }
+      if (restrictions.download) { toast('该分享已禁止下载'); return; }
       const a = document.createElement('a'); a.href = url; a.download = docName; a.click();
     };
     return;

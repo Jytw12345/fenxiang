@@ -21,7 +21,7 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, file_id TEXT, owner_id TEXT, owner_token TEXT, name TEXT, kind TEXT, status TEXT DEFAULT 'active', max_viewers INTEGER DEFAULT 0, max_views INTEGER DEFAULT 0, duration_sec INTEGER DEFAULT 0, expires_at INTEGER, access_code TEXT, auth_mode TEXT DEFAULT 'open', watermark TEXT DEFAULT '', disable_copy INTEGER DEFAULT 1, disable_print INTEGER DEFAULT 1, disable_download INTEGER DEFAULT 1, disable_screenshot INTEGER DEFAULT 0, extra TEXT DEFAULT '', created_at INTEGER, updated_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS logs (id TEXT PRIMARY KEY, share_id TEXT, viewer_token TEXT, ip TEXT, ua TEXT, event TEXT, progress TEXT, created_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS approvals (share_id TEXT, viewer_token TEXT, status TEXT DEFAULT 'pending', requested_at INTEGER, resolved_at INTEGER, PRIMARY KEY (share_id, viewer_token))`,
-    `CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, share_id TEXT, viewer_token TEXT, expires_at INTEGER)`,
+    `CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, share_id TEXT, viewer_token TEXT, expires_at INTEGER, unlocked INTEGER DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS wechat_states (state TEXT PRIMARY KEY, user_id TEXT, openid TEXT, status TEXT DEFAULT 'pending', created_at INTEGER, purpose TEXT, share_id TEXT, viewer_token TEXT, issued_token TEXT, access_token TEXT, expires_at INTEGER)`,
     `CREATE INDEX IF NOT EXISTS idx_logs_share ON logs(share_id)`,
     `CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id)`,
@@ -37,7 +37,7 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, file_id TEXT, owner_id TEXT, owner_token TEXT, name TEXT, kind TEXT, status TEXT DEFAULT 'active', max_viewers INTEGER DEFAULT 0, max_views INTEGER DEFAULT 0, duration_sec INTEGER DEFAULT 0, expires_at BIGINT, access_code TEXT, auth_mode TEXT DEFAULT 'open', watermark TEXT DEFAULT '', disable_copy INTEGER DEFAULT 1, disable_print INTEGER DEFAULT 1, disable_download INTEGER DEFAULT 1, disable_screenshot INTEGER DEFAULT 0, extra TEXT DEFAULT '', created_at BIGINT, updated_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS logs (id TEXT PRIMARY KEY, share_id TEXT, viewer_token TEXT, ip TEXT, ua TEXT, event TEXT, progress TEXT, created_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS approvals (share_id TEXT, viewer_token TEXT, status TEXT DEFAULT 'pending', requested_at BIGINT, resolved_at BIGINT, PRIMARY KEY (share_id, viewer_token))`,
-    `CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, share_id TEXT, viewer_token TEXT, expires_at BIGINT)`,
+    `CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, share_id TEXT, viewer_token TEXT, expires_at BIGINT, unlocked INTEGER DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS wechat_states (state TEXT PRIMARY KEY, user_id TEXT, openid TEXT, status TEXT DEFAULT 'pending', created_at BIGINT, purpose TEXT, share_id TEXT, viewer_token TEXT, issued_token TEXT, access_token TEXT, expires_at BIGINT)`,
     `CREATE INDEX IF NOT EXISTS idx_logs_share ON logs(share_id)`,
     `CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id)`,
@@ -53,7 +53,7 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS shares (id VARCHAR(64) PRIMARY KEY, file_id VARCHAR(64), owner_id VARCHAR(64), owner_token VARCHAR(64), name TEXT, kind TEXT, status VARCHAR(16) DEFAULT 'active', max_viewers INT DEFAULT 0, max_views INT DEFAULT 0, duration_sec INT DEFAULT 0, expires_at BIGINT, access_code TEXT, auth_mode VARCHAR(16) DEFAULT 'open', watermark TEXT, disable_copy INT DEFAULT 1, disable_print INT DEFAULT 1, disable_download INT DEFAULT 1, disable_screenshot INT DEFAULT 0, extra TEXT, created_at BIGINT, updated_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS logs (id VARCHAR(64) PRIMARY KEY, share_id VARCHAR(64), viewer_token TEXT, ip TEXT, ua TEXT, event TEXT, progress TEXT, created_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS approvals (share_id VARCHAR(64), viewer_token TEXT, status VARCHAR(16) DEFAULT 'pending', requested_at BIGINT, resolved_at BIGINT, PRIMARY KEY (share_id, viewer_token))`,
-    `CREATE TABLE IF NOT EXISTS sessions (token VARCHAR(128) PRIMARY KEY, share_id VARCHAR(64), viewer_token TEXT, expires_at BIGINT)`,
+    `CREATE TABLE IF NOT EXISTS sessions (token VARCHAR(128) PRIMARY KEY, share_id VARCHAR(64), viewer_token TEXT, expires_at BIGINT, unlocked INT DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS wechat_states (state VARCHAR(64) PRIMARY KEY, user_id VARCHAR(64), openid TEXT, status VARCHAR(16) DEFAULT 'pending', created_at BIGINT, purpose TEXT, share_id VARCHAR(64), viewer_token TEXT, issued_token TEXT, access_token TEXT, expires_at BIGINT)`,
     `CREATE INDEX IF NOT EXISTS idx_logs_share ON logs(share_id)`,
     `CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id)`,
@@ -171,6 +171,9 @@ async function createDriver() {
   for (const col of ['device', 'os', 'browser', 'country', 'region', 'city']) {
     try { await drv.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT DEFAULT ''`); } catch (e) { /* 列已存在，忽略 */ }
   }
+
+  // 兼容旧库：为 sessions 补齐 unlocked 列（后续内容解锁标记）
+  try { await drv.exec('ALTER TABLE sessions ADD COLUMN unlocked INTEGER DEFAULT 0'); } catch (e) { /* 列已存在，忽略 */ }
 
   const a = approvalSql(type);
   drv.upsertApproval = (shareId, viewerToken, status, requestedAt, resolvedAt) =>

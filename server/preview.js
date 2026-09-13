@@ -27,23 +27,36 @@ function pythonHasPsd(py) {
   } catch (e) { return false; }
 }
 
+function defaultManagedPython() {
+  // WorkBuddy managed venv 的默认路径：跨平台
+  const home = os.homedir();
+  if (process.platform === 'win32') {
+    return path.join(home, '.workbuddy', 'binaries', 'python', 'envs', 'default', 'Scripts', 'python.exe');
+  }
+  return path.join(home, '.workbuddy', 'binaries', 'python', 'envs', 'default', 'bin', 'python');
+}
+
+function locateOnPath(name) {
+  try {
+    const cmd = process.platform === 'win32' ? `where ${name} 2>nul` : `which ${name} 2>/dev/null`;
+    const out = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 })
+      .toString().trim().split(/\r?\n/)[0];
+    return (out && fs.existsSync(out)) ? out : null;
+  } catch (e) { return null; }
+}
+
 function detectPython() {
   if (_pyPsd !== undefined) return _pyPsd;
   const candidates = [];
   if (config.PYTHON_PATH) candidates.push(config.PYTHON_PATH);
-  // 已知装有 psd_tools 的 managed venv（本机沙箱）
-  candidates.push('C:\\Users\\BENQ\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe');
+  // 当前用户的 managed venv（自动适配用户名与平台）
+  candidates.push(defaultManagedPython());
+  // PATH 兜底
   candidates.push('python', 'python3');
   for (const c of candidates) {
     let exe = null;
     if (fs.existsSync(c)) exe = c;
-    else {
-      try {
-        const out = execSync(`where ${c} 2>nul`, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 })
-          .toString().trim().split(/\r?\n/)[0];
-        if (out && fs.existsSync(out)) exe = out;
-      } catch (e) { /* not found */ }
-    }
+    else exe = locateOnPath(c);
     if (exe && pythonHasPsd(exe)) { _pyPsd = exe; return _pyPsd; }
   }
   _pyPsd = null;
