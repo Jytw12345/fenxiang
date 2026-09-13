@@ -50,15 +50,24 @@
   function close() { modal.classList.remove('show'); }
 
   async function bootstrap(token, email) {
-    if (!sb) return email;
+    if (!sb) return { email };
     try {
       const r = await fetch('/api/auth/bootstrap', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userToken: token, inviteCode: (document.getElementById('loginInvite').value || '').trim() })
       });
-      if (r.ok) { const d = await r.json(); return d.email || email; }
-    } catch (e) { /* 后端不可用时仍放行，登录态以后续 /api/auth/me 为准 */ }
-    return email;
+      if (r.ok) {
+        const d = await r.json();
+        return { email: d.email || email, isSuper: !!d.isSuper, role: d.role || 'member' };
+      }
+      // bootstrap 失败（如后端未启用 Supabase）：把错误信息抛出去，避免登录成功却进不了后台
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.message || '身份同步失败，请检查后端 Supabase 配置');
+    } catch (e) {
+      // 网络异常仍放行，登录态以后续 /api/auth/me 为准
+      if (e.message && e.message.includes('身份同步失败')) throw e;
+    }
+    return { email };
   }
 
   // 邮箱密码登录（自托管或 Supabase 两条路径），供 submit 与自动登录复用
@@ -68,8 +77,8 @@
       if (r.error) throw new Error(r.error.message || '登录失败');
       const sess = r.data && r.data.session;
       if (!sess) throw new Error('未获取到会话');
-      const realEmail = await bootstrap(sess.access_token, email);
-      return { token: sess.access_token, email: realEmail, isSuper: false };
+      const boot = await bootstrap(sess.access_token, email);
+      return { token: sess.access_token, email: boot.email, isSuper: boot.isSuper };
     }
     const r = await fetch('/api/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -99,8 +108,8 @@
           if (r.error) { msg.textContent = r.error.message || '失败'; return; }
           const sess = r.data && r.data.session;
           if (!sess) { msg.textContent = '注册成功，请查收验证邮件后再登录'; return; }
-          const realEmail = await bootstrap(sess.access_token, email);
-          done(sess.access_token, realEmail, false);
+          const boot = await bootstrap(sess.access_token, email);
+          done(sess.access_token, boot.email, boot.isSuper);
         } else {
           const r = await fetch('/api/auth/register', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },

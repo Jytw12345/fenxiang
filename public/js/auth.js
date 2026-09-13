@@ -13,9 +13,10 @@ if (!window.ENABLE_WECHAT_LOGIN) {
 
 let mode = 'login'; // login | register
 
-function goApp(token, email) {
+function goApp(token, email, isSuper) {
   localStorage.setItem('userToken', token);
   localStorage.setItem('userEmail', email || '');
+  if (isSuper !== undefined) localStorage.setItem('userIsSuper', isSuper ? '1' : '0');
   location.href = '/admin.html';
 }
 
@@ -28,7 +29,7 @@ async function bootstrapAndGo(token, email) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userToken: token, inviteCode: invite })
     });
-    if (r.ok) { const d = await r.json(); goApp(token, d.email || email); return; }
+    if (r.ok) { const d = await r.json(); goApp(token, d.email || email, d.isSuper); return; }
   } catch (e) { /* 网络异常也放行，后续接口会要求登录 */ }
   goApp(token, email);
 }
