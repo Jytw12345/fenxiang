@@ -666,9 +666,19 @@ async function showStorePicker() {
 }
 async function initOrg() {
   if (!orgToken) return;
-  try { const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(orgToken)); meState = await r.json(); }
-  catch (e) { return; }
-  if (!meState) return;
+  try {
+    const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(orgToken), { cache: 'no-store' });
+    if (!r.ok) throw new Error('session_invalid');
+    meState = await r.json();
+  } catch (e) {
+    // 令牌无效：与 initUserArea 保持一致，清除并回到登录态，避免误弹门店选择器
+    localStorage.removeItem('userToken');
+    localStorage.removeItem('userEmail');
+    showLogin();
+    if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: false });
+    return;
+  }
+  if (!meState || !meState.id) return;
   // 取消“按邮箱域名自动分配门店”：未归属门店的普通用户，登录后弹出选择门店
   if (!meState.orgId && !meState.isSuper) { showStorePicker(); }
 
