@@ -1,0 +1,44 @@
+# Render 部署配置：把 Node 应用服务跑在 Render（免费额度足够几十人并发）。
+# 用法：在 Render 控制台「New → Web Service」导入此仓库，或连接 GitHub 自动识别。
+# 注意：下面的密钥类变量（值 sync:false）需在 Render 控制台手动填写，不要提交明文。
+services:
+  - type: web
+    name: fenxiang
+    runtime: node
+    plan: free
+    region: singapore          # 离国内近；可选 oregon/frankfurt
+    branch: main
+    buildCommand: npm install   # 含 optionalDependencies（pg / mysql2 / cos-nodejs-sdk-v5）
+    startCommand: node server/index.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DB_TYPE
+        value: postgres
+      - key: DATABASE_URL
+        sync: false            # 填 Supabase 的「Session pooler」连接串（端口 5432）。Render 等 IPv4-only 网络无法连 Direct connection（IPv6），不要用 Transaction pooler 6543
+      - key: SUPABASE_URL
+        sync: false            # 填你的 Supabase 项目 URL
+      - key: SUPABASE_ANON_KEY
+        sync: false            # Supabase anon/public key（公开）
+      - key: SUPABASE_JWT_SECRET
+        sync: false            # Supabase JWT Secret（仅后端，勿泄露）
+      - key: COS_SECRET_ID
+        sync: false            # 腾讯云 COS（留空则回退本地磁盘）
+      - key: COS_SECRET_KEY
+        sync: false
+      - key: COS_BUCKET
+        sync: false
+      - key: COS_REGION
+        sync: false
+      - key: REGISTER_DOMAIN
+        sync: false            # 如 company.com：仅该域名可自助注册，首位成店长
+      - key: SUPER_ADMIN_EMAILS
+        value: "309953160@qq.com"  # 超级管理员邮箱，注册/首登后自动获得全后台权限
+      - key: BASE_URL
+        sync: https://fenxiang.onrender.com            # 对外地址（微信回调用），如 https://fenxiang.onrender.com
+      - key: PREVIEW_ENABLED
+        value: "1"
+      - key: PYTHON_PATH
+        sync: false            # 服务器上装有 psd-tools 的 Python 解释器路径（PSD 预览用）
