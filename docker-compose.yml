@@ -1,0 +1,26 @@
+services:
+  safe-share:
+    build: .
+    container_name: safe-share
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DATA_DIR=/app/data
+      - UPLOAD_DIR=/app/uploads
+      - USER_TOKEN_TTL_MS=604800000
+      # 改成你的公网域名（微信回调 / 分享链接拼接需要）
+      - BASE_URL=https://your-domain.example.com
+      # 微信开放平台网站应用（留空则走模拟流程）
+      - WECHAT_APPID=
+      - WECHAT_SECRET=
+      # 腾讯云 COS（四个同时填才启用，否则本地磁盘）
+      - COS_SECRET_ID=
+      - COS_SECRET_KEY=
+      - COS_BUCKET=
+      - COS_REGION=
+      - COS_BASE_URL=
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    restart: unless-stopped
