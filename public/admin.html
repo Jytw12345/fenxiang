@@ -43,6 +43,7 @@
     <button class="tab" data-tab="users" id="tabUsers" style="display:none">用户管理</button>
     <button class="tab" data-tab="audit" id="tabAudit" style="display:none">操作日志</button>
     <button class="tab" data-tab="stores" id="tabStores" style="display:none">门店管理</button>
+    <button class="tab" data-tab="globals" id="tabGlobals" style="display:none">全局参数</button>
   </div>
 
   <div id="list"></div>
@@ -63,6 +64,7 @@
     <div id="superUsers" style="display:none"></div>
     <div id="superAudit" style="display:none"></div>
     <div id="superStores" style="display:none"></div>
+    <div id="superGlobals" style="display:none"></div>
   </div>
 
   <div id="filesPanel" style="display:none"></div>
@@ -104,7 +106,7 @@
 
       <!-- 文件与访问码 -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">📄</span>文件与访问码</div>
+        <div class="tile-hd"><span class="ic">📄</span><span class="ttl">文件与访问码</span></div>
         <div class="tile-bd">
           <div class="pfield">
             <label>文件名称 <small>展示给访客，默认使用原文件名</small></label>
@@ -119,7 +121,7 @@
 
       <!-- 访问限制 -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">👥</span>访问限制 <small>0 = 不限制</small></div>
+        <div class="tile-hd"><span class="ic">👥</span><span class="ttl">访问限制</span><small>0 = 不限制</small></div>
         <div class="tile-bd">
           <div class="triple-row sec-grid">
             <div>
@@ -140,7 +142,7 @@
 
       <!-- 有效期（与其他卡片同宽） -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">⏳</span>有效期</div>
+        <div class="tile-hd"><span class="ic">⏳</span><span class="ttl">有效期</span></div>
         <div class="tile-bd">
           <div class="exp-bar">
             <div class="exp-chips" id="expireChips">
@@ -161,7 +163,7 @@
 
       <!-- 验证方式（单选胶囊） -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">🔐</span>验证方式 <small>单选</small></div>
+        <div class="tile-hd"><span class="ic">🔐</span><span class="ttl">验证方式</span><small>单选</small></div>
         <div class="tile-bd">
           <div class="auth-chips" id="authChips">
             <button type="button" data-val="open" class="active">
@@ -182,7 +184,7 @@
 
       <!-- 防盗用 -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">🛡️</span>防盗用</div>
+        <div class="tile-hd"><span class="ic">🛡️</span><span class="ttl">防盗用</span><small>限制访客操作</small></div>
         <div class="tile-bd">
           <div class="chips">
             <label class="switch rest-doc"><input type="checkbox" id="rCopy" checked /> <span>禁止复制</span></label>
@@ -190,29 +192,44 @@
             <label class="switch rest-all"><input type="checkbox" id="rDownload" checked /> <span>禁止下载</span></label>
             <label class="switch rest-shot"><input type="checkbox" id="rScreenshot" /> <span>防截图</span></label>
           </div>
+          <label class="opt-row">
+            <input type="checkbox" id="antiForward" />
+            <span class="otxt"><span class="ot">链接防转发</span><span class="os">仅首次打开的设备可访问</span></span>
+          </label>
         </div>
       </div>
 
       <!-- 水印 -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">💧</span>水印</div>
+        <div class="tile-hd"><span class="ic">💧</span><span class="ttl">水印</span><small>预览与下载留痕</small></div>
         <div class="tile-bd">
-          <div class="pfield">
-            <label>水印文字 <small>显示在文件预览上方，留空不显示</small></label>
-            <input id="watermark" placeholder="如：内部资料 严禁外传" />
+          <div class="chips wm-types">
+            <label><input type="radio" name="wmMode" value="none" checked /> <span>无水印</span></label>
+            <label><input type="radio" name="wmMode" value="static" /> <span>静态水印</span></label>
+            <label><input type="radio" name="wmMode" value="dynamic" /> <span>动态水印</span></label>
           </div>
+          <div class="wm-textwrap" id="wmTextWrap">
+            <input id="wmText" maxlength="40" placeholder="水印文字，如：内部资料 严禁外传" />
+            <small id="wmHint" class="wm-hint"></small>
+          </div>
+          <label class="opt-row" id="wmDlWrap">
+            <input type="checkbox" id="wmDl" />
+            <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF / Word</span></span>
+          </label>
         </div>
       </div>
 
       <!-- 预览限制（跨整行） -->
       <div class="tile tile-wide">
-        <div class="tile-hd"><span class="ic">👁️</span>预览限制 <small>仅 PDF / Word 生效</small></div>
+        <div class="tile-hd"><span class="ic">👁️</span><span class="ttl">预览限制</span><small>仅 PDF / Word 生效</small></div>
         <div class="tile-bd">
-          <div class="preview-limit no-mb">
-            <label class="switch-row">
-              <input type="checkbox" id="previewEnabled" />
-              <span>仅允许预览前 <input id="previewPages" type="number" min="1" value="2" /> 页，后续需输入密码 <input id="protectPassword" type="text" placeholder="查看密码" autocomplete="off" /></span>
-            </label>
+          <label class="opt-row">
+            <input type="checkbox" id="previewEnabled" />
+            <span class="otxt"><span class="ot">仅允许试看前几页</span><span class="os">超出页数需输入密码后才能继续查看</span></span>
+          </label>
+          <div class="triple-row sec-grid">
+            <div><div class="tiny-label">试看页数</div><input id="previewPages" type="number" min="1" value="2" /></div>
+            <div><div class="tiny-label">超出后密码</div><input id="protectPassword" type="text" placeholder="留空则不可看" autocomplete="off" /></div>
           </div>
         </div>
       </div>
@@ -267,7 +284,23 @@
               <select id="setAuthMode" class="inp"><option value="open">公开（任何人可打开）</option><option value="approve">申请授权（需我批准）</option><option value="wechat" hidden>微信验证（访客扫码）</option></select>
             </div>
             <div class="frow"><label>默认访问码</label><input id="setCode" class="inp" placeholder="留空不设" /></div>
-            <div class="frow"><label>默认水印</label><input id="setWatermark" class="inp" placeholder="如：内部资料 严禁外传" /></div>
+            <div class="frow frow-wm"><label>默认水印</label>
+              <div class="wm-widget">
+                <div class="chips wm-types">
+                  <label><input type="radio" name="setWmMode" value="none" checked /> <span>无水印</span></label>
+                  <label><input type="radio" name="setWmMode" value="static" /> <span>静态水印</span></label>
+                  <label><input type="radio" name="setWmMode" value="dynamic" /> <span>动态水印</span></label>
+                </div>
+                <div class="wm-textwrap" id="setWmTextWrap">
+                  <input id="setWmText" maxlength="40" class="inp" placeholder="水印文字，如：内部资料 严禁外传" />
+                  <small id="setWmHint" class="wm-hint"></small>
+                </div>
+                <label class="opt-row" id="setWmDlWrap">
+                  <input type="checkbox" id="setWmDl" />
+                  <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF / Word</span></span>
+                </label>
+              </div>
+            </div>
             <div class="frow"><label>最大人数</label><input id="setMaxViewers" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
             <div class="frow"><label>最大次数</label><input id="setMaxViews" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
             <div class="frow"><label>单次时长(分)</label><input id="setDuration" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
@@ -279,6 +312,7 @@
             <label class="switch"><input type="checkbox" id="setPrint" checked /> <span>禁止打印</span></label>
             <label class="switch"><input type="checkbox" id="setDownload" checked /> <span>禁止下载</span></label>
             <label class="switch"><input type="checkbox" id="setScreenshot" /> <span>防截图</span></label>
+            <label class="switch"><input type="checkbox" id="setAntiForward" /> <span>链接防转发</span></label>
           </div>
         </section>
       </div>
@@ -478,6 +512,15 @@
       <a class="btn ghost sm" id="openViewer" target="_blank">预览</a>
       <button class="btn sm" id="openAdmin">进入我的分享</button>
     </div>
+  </div>
+</div>
+
+<!-- 文件预览弹窗：用 iframe 承载专业文档查看器（含缩放/拖移/捏合），复用客户端的完整能力 -->
+<div class="modal" id="filePreviewModal">
+  <div class="box fp-box">
+    <div class="fp-hd"><span id="fpName" class="fp-name">文件预览</span></div>
+    <iframe id="fpFrame" class="fp-frame" frameborder="0" title="文件预览"></iframe>
+    <button class="modal-close" onclick="closeFilePreview()" aria-label="关闭">×</button>
   </div>
 </div>
 

@@ -25,6 +25,19 @@
   #docName{font-weight:800;font-size:15px;color:var(--ink);word-break:break-all;}
   .tb-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;}
   #dlTop{padding:7px 16px;font-size:13px;white-space:nowrap;}
+
+  /* 缩放查看器 */
+  #pdfStage{overflow-x:auto;width:100%;touch-action:pan-y;-webkit-overflow-scrolling:touch;}
+  #pages.zoomed canvas{max-width:none;}
+  #imgStage{position:relative;overflow:hidden;touch-action:none;width:100%;min-height:62vh;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.08);}
+  #imgStage .zcontent{transform-origin:0 0;will-change:transform;}
+  #imgStage img{max-width:none;}
+  .zbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:4px;background:#1f2430ee;color:#fff;padding:6px 8px;border-radius:999px;box-shadow:0 6px 24px rgba(0,0,0,.28);user-select:none;-webkit-user-select:none;}
+  .zbar .zbtn{background:transparent;border:0;color:#fff;font-size:16px;line-height:1;padding:6px 10px;border-radius:999px;cursor:pointer;min-width:34px;font-family:inherit;}
+  .zbar .zbtn:hover{background:#ffffff22;}
+  .zbar .z-pct{min-width:48px;text-align:center;font-size:13px;font-variant-numeric:tabular-nums;}
+  .zbar .zsep{width:1px;height:18px;background:#ffffff33;margin:0 2px;}
+  @media(max-width:560px){.zbar{bottom:10px;padding:5px 6px;}.zbar .zbtn{min-width:30px;padding:5px 8px;}}
 </style>
 </head>
 <body>

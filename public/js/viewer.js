@@ -6,26 +6,60 @@ const params = new URLSearchParams(location.search);
 const shareId = params.get('share');
 let viewerToken = localStorage.getItem('viewerToken');
 if (!viewerToken) { viewerToken = crypto.randomUUID(); localStorage.setItem('viewerToken', viewerToken); }
-let accessToken = null, restrictions = {}, watermarkText = '', kind = '', docName = '', expiresIn = 0, sessionStart = 0, hasPreview = false, previewPages = 0, needProtect = false, pdfDoc = null, totalPages = 0;
+
+// 防嵌套：禁止被其它网站以 iframe 方式嵌入盗用。同源嵌入（如后台预览）不受影响。
+// 浏览器 X-Frame-Options 已兜底拦截跨域嵌入；此处为防御纵深，跨域读取顶层来源会抛错 → 判定为非法嵌入。
+(function antiEmbed() {
+  try {
+    if (window.self === window.top) return;            // 非嵌入，放行
+    const topOrigin = new URL(window.top.location.href).origin;
+    if (topOrigin === location.origin) return;          // 同源嵌入，放行
+    document.documentElement.innerHTML = '<h2 style="padding:40px;text-align:center;color:#374151">该页面不允许被嵌入其它网站</h2>';
+    throw new Error('embedded-blocked');
+  } catch (e) {
+    if (String(e && e.message).indexOf('embedded-blocked') >= 0)
+      document.documentElement.innerHTML = '<h2 style="padding:40px;text-align:center;color:#374151">该页面不允许被嵌入其它网站</h2>';
+  }
+})();
+let accessToken = null, restrictions = {}, wm = null, kind = '', docName = '', expiresIn = 0, sessionStart = 0, hasPreview = false, previewPages = 0, needProtect = false, pdfDoc = null, totalPages = 0;
 let downloadUrl = null;   // 受保护下载用的 blob URL（仅允许下载的文件类型会生成）
 
 function shortId() { return viewerToken.slice(0, 8); }
 
 // ---------- 水印 ----------
-function buildWatermark(text) {
-  const wm = $('#wm'); wm.innerHTML = '';
-  const base = (text || '内部资料 严禁外传') + '  ' + shortId();
+// 后端下发 watermark 可能是 null / 旧版纯字符串 / 新模型对象 {mode,text,dl}
+function parseWm(v) {
+  if (!v) return null;
+  if (typeof v === 'string') { if (!v.length) return null; return { mode: 'static', text: v, dl: false }; }
+  if (v && v.mode && v.mode !== 'none') return { mode: v.mode, text: v.text || '', dl: !!v.dl };
+  return null;
+}
+function wmBaseText() { return (wm && wm.text) ? wm.text : '内部资料 严禁外传'; }
+function buildWatermark() {
+  const wmEl = $('#wm'); wmEl.innerHTML = '';
+  if (!wm) { wmEl.style.display = 'none'; return; }
+  wmEl.style.display = '';
   for (let i = 0; i < 26; i++) {
     const s = document.createElement('span');
-    s.textContent = base;
+    s.textContent = wmBaseText() + '  ' + shortId();
     s.style.left = (i % 6) * 17 + '%';
     s.style.top = Math.floor(i / 6) * 18 + '%';
-    wm.appendChild(s);
+    wmEl.appendChild(s);
   }
+  if (wm.mode === 'dynamic') startDynamicWatermark();
 }
+// 动态水印：实时刷新访客ID + 时间，泄露后可溯源
+function startDynamicWatermark() {
+  const wmEl = $('#wm');
+  setInterval(() => {
+    const t = new Date().toTimeString().slice(0, 8);
+    wmEl.querySelectorAll('span').forEach(s => { s.textContent = wmBaseText() + '  ' + shortId() + '  ' + t; });
+  }, 1000);
+}
+// 动态水印 / 防截图：让水印层缓慢漂移，提升截图留存难度
 function startMovingWatermark() {
-  const wm = $('#wm'); let t = 0;
-  setInterval(() => { t = (t + 1) % 40; wm.style.transform = `translate(${t}px, ${t}px)`; }, 120);
+  const wmEl = $('#wm'); let t = 0;
+  setInterval(() => { t = (t + 1) % 40; wmEl.style.transform = `translate(${t}px, ${t}px)`; }, 120);
 }
 
 // ---------- 限制操作 ----------
@@ -127,7 +161,7 @@ async function loadMeta() {
   const m = await r.json();
   if (!r.ok) { $('#gateTitle').textContent = '无法打开'; showGate('<p class="sub" style="text-align:center">' + (m.error || '链接无效') + '</p>'); return false; }
   if (m.status !== 'active') { $('#gateTitle').textContent = '文档已下架'; showGate('<p class="sub" style="text-align:center">该文档已被分享者销毁或下架。</p>'); return false; }
-  docName = m.name; kind = m.kind; restrictions = m.restrictions; watermarkText = m.watermark; hasPreview = !!m.preview;
+  docName = m.name; kind = m.kind; restrictions = m.restrictions; wm = parseWm(m.watermark); hasPreview = !!m.preview;
   previewPages = (m.extra && Number(m.extra.previewPages) > 0) ? Number(m.extra.previewPages) : 0;
   needProtect = !!(m.extra && m.extra.needProtect);
   $('#docName').textContent = docName;
@@ -148,8 +182,8 @@ async function enterContent(res) {
   accessToken = res.accessToken; expiresIn = res.expiresIn; sessionStart = Date.now();
   if (res.previewPages !== undefined) previewPages = Number(res.previewPages) || 0;
   if (res.needProtect !== undefined) needProtect = !!res.needProtect;
-  if (res.watermark) buildWatermark(res.watermark); else buildWatermark('');
-  if (restrictions.screenshot) startMovingWatermark();
+  buildWatermark();
+  if ((wm && wm.mode === 'dynamic') || restrictions.screenshot) startMovingWatermark();
   applyRestrictions();
   // 允许下载时，顶部显示统一下载入口（PDF / 图片 / Word / 源文件均适用）
   const dlTop = $('#dlTop');
@@ -165,6 +199,10 @@ async function requestAccess(code) {
   const r = await fetch('/api/access', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ shareId, viewerToken, code }) });
   const res = await r.json();
+  if (res.error === 'link_bound') {
+    showGate('<p class="sub" style="text-align:center">' + (res.message || '该链接已绑定首次打开的设备，无法转发给他人使用。') + '</p>');
+    return;
+  }
   if (res.needCode) {
     showGate('<label class="field">请输入访问码</label><input id="codeInput" placeholder="访问码"/><button class="btn" style="width:100%;margin-top:10px" id="codeOk">确认</button>');
     $('#codeOk').onclick = () => requestAccess($('#codeInput').value.trim());
@@ -193,7 +231,7 @@ async function requestAccess(code) {
             const c = await (await fetch('/api/wechat/check?state=' + d.state)).json();
             if (c.ok && c.verified) {
               clearInterval(timer);
-              await enterContent({ accessToken: c.accessToken, kind, watermark: watermarkText, restrictions, expiresIn: c.expiresIn });
+              await enterContent({ accessToken: c.accessToken, kind, watermark: wm, restrictions, expiresIn: c.expiresIn });
             }
           } catch (e) { /* 轮询容错 */ }
         }, 1500);
@@ -221,6 +259,7 @@ async function loadImage(url) {
   const u = URL.createObjectURL(blob);
   const img = document.createElement('img'); img.src = u; img.draggable = false;
   $('#imgWrap').style.display = 'block'; $('#imgWrap').appendChild(img);
+  enableImageZoom(img);
 }
 
 // 源文件预览：尝试从后端加载预览图。后端会在预览缺失时按需生成（首次访问可能稍慢），
@@ -250,15 +289,20 @@ async function loadSourcePreview() {
   }
 }
 
-async function renderPdfPage(i) {
+async function pdfRenderPage(i, scale) {
   if (!pdfDoc) return;
-  const page = await pdfDoc.getPage(i);
-  const vp = page.getViewport({ scale: 1.4 });
-  const canvas = document.createElement('canvas');
-  canvas.dataset.page = i;
-  canvas.width = vp.width; canvas.height = vp.height;
-  $('#pages').appendChild(canvas);
-  await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+  const pg = await pdfDoc.getPage(i);
+  const s = scale || (pdfPages[i] && pdfPages[i].renderScale) || BASE_SCALE;
+  const vp = pg.getViewport({ scale: s });
+  const baseW = pg.getViewport({ scale: 1 }).width;   // 显示宽度与栅格倍率解耦，缩放不跳变
+  let rec = pdfPages[i];
+  if (!rec) { rec = { page: pg, canvas: document.createElement('canvas'), renderScale: 0, baseW }; rec.canvas.dataset.page = i; pdfPages[i] = rec; }
+  rec.baseW = baseW;
+  rec.canvas.width = vp.width; rec.canvas.height = vp.height;
+  rec.canvas.style.width = baseW * pdfDisplay + 'px';
+  rec.renderScale = s;
+  if (!rec.canvas.parentNode) $('#pages').appendChild(rec.canvas);
+  await pg.render({ canvasContext: rec.canvas.getContext('2d'), viewport: vp }).promise;
   report('progress', 'p' + i + '/' + totalPages);
 }
 function renderUnlockBox(limit, total) {
@@ -284,7 +328,7 @@ function renderUnlockBox(limit, total) {
       if (!r.ok) { $('#unlockErr').textContent = d.message || '密码错误'; return; }
       needProtect = false;
       box.remove();
-      for (let i = limit + 1; i <= total; i++) await renderPdfPage(i);
+      for (let i = limit + 1; i <= total; i++) await pdfRenderPage(i);
     } catch (e) { $('#unlockErr').textContent = '网络错误，请重试'; }
   };
   $('#unlockPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#unlockBtn').click(); });
@@ -292,6 +336,7 @@ function renderUnlockBox(limit, total) {
 
 async function loadContent(k) {
   if (k === 'pdf') {
+    pdfPages = []; pdfDisplay = 1;
     if (!window.pdfjsLib) { $('#pages').innerHTML = '<p class="sub">PDF 组件加载失败（本地 PDF.js 缺失）</p>'; return; }
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
     // 用 URL 流式加载：pdf.js 按页 Range 拉取，第一页先出，无需整本下载解析完才显示。
@@ -303,7 +348,7 @@ async function loadContent(k) {
     }
     totalPages = pdfDoc.numPages;
     const limit = previewPages && previewPages < totalPages ? previewPages : totalPages;
-    for (let i = 1; i <= limit; i++) await renderPdfPage(i);
+    for (let i = 1; i <= limit; i++) await pdfRenderPage(i);
     // 预览页数限制：未渲染的后续页暂不展示；如需密码保护则显示解锁表单
     if (limit < totalPages) {
       if (needProtect) renderUnlockBox(limit, totalPages);
@@ -315,6 +360,7 @@ async function loadContent(k) {
         $('#pages').appendChild(tip);
       }
     }
+    enablePdfZoom();
     return;
   }
 
@@ -326,6 +372,7 @@ async function loadContent(k) {
     img.onerror = () => { $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">图片加载失败或被拒绝</p>'); };
     $('#imgWrap').style.display = 'block';
     $('#imgWrap').appendChild(img);
+    enableImageZoom(img);
     return;
   }
 
@@ -365,6 +412,187 @@ async function saveDoc() {
   const a = document.createElement('a');
   a.href = downloadUrl; a.download = docName; a.click();
 }
+
+// ========== 缩放 / 平移 / 手势查看器 ==========
+// ---- 可调参数：改这里即可微调体验（无需动下面的逻辑）----
+const ZOOM_CFG = {
+  min: 0.5,                 // 最小显示倍率（缩小下限）
+  max: 4,                   // 最大显示倍率（放大上限）
+  pdfBaseScale: 2,          // PDF 栅格化基准倍率（≈144DPI；越大越清晰但越占带宽）
+  pdfCrispCap: 4,           // PDF 放大时按需重渲染的最高栅格倍率（决定放大后是否糊）
+  pdfCrispMargin: 0.2,      // 清晰度判定余量（renderScale 达到 need-margin 即视为够清晰）
+  pdfCrispDebounce: 220,    // 停止缩放后多久重渲染可见页（ms）
+  stepIn: 1.25,             // 工具条「+」按钮倍率步进
+  stepOut: 0.8,             // 工具条「−」按钮倍率步进
+  wheelPdf: 1.1,            // PDF 滚轮（Ctrl/⌘+滚轮）每格倍率
+  wheelImg: 1.12,           // 图片滚轮每格倍率
+  dblClickToggle: 2,        // 图片双击在 1× 与该值之间切换
+};
+const BASE_SCALE = ZOOM_CFG.pdfBaseScale;
+const MIN_DISP = ZOOM_CFG.min, MAX_DISP = ZOOM_CFG.max;
+let pdfDisplay = 1;
+let pdfPages = [];                    // {page, canvas, renderScale, baseW}
+let crispTimer = null;
+let zbar = null;
+let zoomMode = null;                  // 'pdf' | 'image' | null
+let imgScale = 1, imgX = 0, imgY = 0, imgContent = null, imgStage = null;
+let pdfZoomReady = false, imgZoomReady = false;
+
+function ensureZbar() {
+  if (zbar) { zbar.style.display = 'flex'; return zbar; }
+  zbar = document.createElement('div');
+  zbar.className = 'zbar';
+  zbar.innerHTML =
+    '<button class="zbtn" data-act="out" title="缩小">−</button>' +
+    '<span class="z-pct">100%</span>' +
+    '<button class="zbtn" data-act="in" title="放大">+</button>' +
+    '<span class="zsep"></span>' +
+    '<button class="zbtn" data-act="reset" title="复位">复位</button>' +
+    '<button class="zbtn" data-act="full" title="全屏">全屏</button>';
+  zbar.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const a = b.dataset.act;
+    if (a === 'in') zoomStep(ZOOM_CFG.stepIn);
+    else if (a === 'out') zoomStep(ZOOM_CFG.stepOut);
+    else if (a === 'reset') zoomReset();
+    else if (a === 'full') zoomFull();
+  });
+  document.body.appendChild(zbar);
+  return zbar;
+}
+function setZpct(v) { const p = zbar && zbar.querySelector('.z-pct'); if (p) p.textContent = Math.round(v * 100) + '%'; }
+function zoomFull() {
+  const el = document.documentElement;
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (el.requestFullscreen) el.requestFullscreen();
+}
+function zoomStep(f) { if (zoomMode === 'pdf') pdfSetDisplay(pdfDisplay * f); else if (zoomMode === 'image') imgSetScale(imgScale * f); }
+function zoomReset() { if (zoomMode === 'pdf') pdfSetDisplay(1); else if (zoomMode === 'image') imgSetScale(1); }
+
+// ---- PDF：改 canvas 显示宽度实现缩放，纵向原生滚动，宽页可原生横滑；放大到一定程度时重渲染可见页保持清晰 ----
+function pdfApplyWidths() {
+  pdfPages.forEach((r) => { if (r && r.canvas) r.canvas.style.width = r.baseW * pdfDisplay + 'px'; });
+}
+function pdfEnsureCrisp() {
+  if (crispTimer) clearTimeout(crispTimer);
+  crispTimer = setTimeout(async () => {
+    const need = Math.min(ZOOM_CFG.pdfCrispCap, BASE_SCALE * pdfDisplay);
+    const vh = window.innerHeight;
+    for (const rec of pdfPages) {
+      if (!rec || !rec.canvas || !rec.canvas.parentNode) continue;
+      const r = rec.canvas.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > vh) continue;          // 只重渲染可见页，省流量
+      if (rec.renderScale >= need - ZOOM_CFG.pdfCrispMargin) continue;
+      try { await pdfRenderPage(rec.canvas.dataset.page * 1, need); } catch (e) {}
+    }
+  }, ZOOM_CFG.pdfCrispDebounce);
+}
+function pdfSetDisplay(v) {
+  pdfDisplay = Math.min(MAX_DISP, Math.max(MIN_DISP, v));
+  $('#pages').classList.add('zoomed');
+  pdfApplyWidths();
+  setZpct(pdfDisplay);
+  pdfEnsureCrisp();
+}
+function enablePdfZoom() {
+  if (pdfZoomReady) return; pdfZoomReady = true;
+  zoomMode = 'pdf';
+  const stage = document.createElement('div'); stage.id = 'pdfStage';
+  const pages = $('#pages');
+  pages.parentNode.insertBefore(stage, pages);
+  stage.appendChild(pages);
+  pages.classList.add('zoomed');
+  ensureZbar(); setZpct(1);
+  // 桌面：Ctrl/⌘ + 滚轮缩放（不影响纵向滚动）
+  stage.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    pdfSetDisplay(pdfDisplay * (e.deltaY < 0 ? ZOOM_CFG.wheelPdf : 1 / ZOOM_CFG.wheelPdf));
+  }, { passive: false });
+  // 触屏：双指捏合缩放
+  let pinch = 0;
+  stage.addEventListener('touchstart', (e) => { if (e.touches.length === 2) pinch = touchDist(e); }, { passive: true });
+  stage.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2 && pinch) {
+      e.preventDefault();
+      const d = touchDist(e);
+      pdfSetDisplay(pdfDisplay * (d / pinch));
+      pinch = d;
+    }
+  }, { passive: false });
+  stage.addEventListener('touchend', () => { pinch = 0; });
+  window.addEventListener('resize', () => pdfEnsureCrisp());
+}
+
+// ---- 图片：transform 缩放 + 拖移 + 捏合，基于原图像素故放大不损画质 ----
+function imgApply() { if (imgContent) { imgContent.style.transform = `translate(${imgX}px,${imgY}px) scale(${imgScale})`; setZpct(imgScale); } }
+function imgSetScale(v) { imgScale = Math.min(MAX_DISP, Math.max(MIN_DISP, v)); imgClamp(); imgApply(); }
+function imgClamp() {
+  if (!imgStage || !imgContent) return;
+  const sw = imgStage.clientWidth, sh = imgStage.clientHeight;
+  const cw = imgContent.offsetWidth * imgScale, ch = imgContent.offsetHeight * imgScale;
+  if (cw <= sw) imgX = (sw - cw) / 2; else imgX = Math.min(0, Math.max(sw - cw, imgX));
+  if (ch <= sh) imgY = (sh - ch) / 2; else imgY = Math.min(0, Math.max(sh - ch, imgY));
+}
+function enableImageZoom(imgEl) {
+  if (imgZoomReady) return; imgZoomReady = true;
+  zoomMode = 'image';
+  imgStage = document.createElement('div'); imgStage.id = 'imgStage';
+  imgContent = document.createElement('div'); imgContent.className = 'zcontent';
+  imgEl.parentNode.insertBefore(imgStage, imgEl);
+  imgStage.appendChild(imgContent); imgContent.appendChild(imgEl);
+  imgEl.style.maxWidth = 'none'; imgEl.style.width = 'auto'; imgEl.style.height = 'auto'; imgEl.draggable = false;
+  ensureZbar(); setZpct(1);
+  const fit = () => {
+    const nw = imgEl.naturalWidth || imgEl.width, nh = imgEl.naturalHeight || imgEl.height;
+    const f = Math.min((imgStage.clientWidth / (nw || 1)) || 1, (imgStage.clientHeight / (nh || 1)) || 1, 1);
+    imgScale = f || 1;
+    imgX = (imgStage.clientWidth - nw * imgScale) / 2;
+    imgY = (imgStage.clientHeight - nh * imgScale) / 2;
+    imgApply();
+  };
+  if (imgEl.complete) fit(); else imgEl.onload = fit;
+  imgStage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = imgStage.getBoundingClientRect();
+    const ox = e.clientX - rect.left, oy = e.clientY - rect.top;
+    const ns = Math.min(MAX_DISP, Math.max(MIN_DISP, imgScale * (e.deltaY < 0 ? ZOOM_CFG.wheelImg : 1 / ZOOM_CFG.wheelImg)));
+    imgX = ox - (ox - imgX) * (ns / imgScale);
+    imgY = oy - (oy - imgY) * (ns / imgScale);
+    imgScale = ns; imgClamp(); imgApply();
+  }, { passive: false });
+  let dragging = false, lx = 0, ly = 0;
+  imgStage.addEventListener('mousedown', (e) => { dragging = true; lx = e.clientX; ly = e.clientY; imgStage.style.cursor = 'grabbing'; });
+  window.addEventListener('mousemove', (e) => { if (!dragging) return; imgX += e.clientX - lx; imgY += e.clientY - ly; lx = e.clientX; ly = e.clientY; imgClamp(); imgApply(); });
+  window.addEventListener('mouseup', () => { dragging = false; if (imgStage) imgStage.style.cursor = ''; });
+  let last = null, pinchD = 0;
+  imgStage.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) last = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    else if (e.touches.length === 2) { pinchD = touchDist(e); last = null; }
+  }, { passive: true });
+  imgStage.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && last) {
+      imgX += e.touches[0].clientX - last.x; imgY += e.touches[0].clientY - last.y;
+      last = { x: e.touches[0].clientX, y: e.touches[0].clientY }; imgClamp(); imgApply();
+    } else if (e.touches.length === 2) {
+      const d = touchDist(e), m = touchMid(e);
+      const rect = imgStage.getBoundingClientRect();
+      const ns = Math.min(MAX_DISP, Math.max(MIN_DISP, imgScale * (d / (pinchD || d))));
+      const ox = m.x - rect.left, oy = m.y - rect.top;
+      imgX = ox - (ox - imgX) * (ns / imgScale);
+      imgY = oy - (oy - imgY) * (ns / imgScale);
+      imgScale = ns; pinchD = d; imgClamp(); imgApply();
+    }
+  }, { passive: false });
+  imgStage.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) pinchD = 0;
+    if (e.touches.length === 1) last = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  });
+  imgStage.addEventListener('dblclick', () => imgSetScale(imgScale > 1.05 ? 1 : ZOOM_CFG.dblClickToggle));
+}
+function touchDist(e) { const a = e.touches[0], b = e.touches[1]; return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
+function touchMid(e) { const a = e.touches[0], b = e.touches[1]; return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }; }
 
 (async () => {
   if (!shareId) { $('#gateTitle').textContent = '缺少参数'; showGate('<p class="sub">无效的分享链接</p>'); return; }

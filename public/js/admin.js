@@ -176,9 +176,31 @@ window.clearShareSel = () => { selectedShareIds.clear(); renderMineGrid(); };
 // selectable=true 时在卡片左上渲染批量勾选框（仅「我的分享」启用）。
 // 操作区采用「主操作 + 更多菜单」两段式：预览/复制链接常驻，次级操作收进「更多」，
 // 这样在 280px 宽的卡片里也能保证操作按钮只占一行，且功能一个不少。
+// 兼容 BIGINT 被驱动的字符串形式（如未配置类型解析器的 postgres）：统一按毫秒时间戳格式化，
+// 避免 new Date("1757...") 得到 Invalid Date。数值本身也一并兼容（sqlite/mysql 直接是数字）。
+function toDateMs(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);                       // 毫秒时间戳（数字或数字串）
+  if (Number.isFinite(n)) return n;
+  const t = Date.parse(v);                   // 兜底：ISO / 可解析日期串
+  return Number.isFinite(t) ? t : null;
+}
+function fmtTs(v) {
+  const ms = toDateMs(v);
+  if (!ms) return '—';
+  const d = new Date(ms);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+function fmtDay(v) {
+  const ms = toDateMs(v);
+  if (!ms) return '—';
+  const d = new Date(ms);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString();
+}
+
 function shareCardHtml(s, own, selectable) {
   const link = location.origin + s.link;
-  const exp = s.expiresAt ? new Date(s.expiresAt).toLocaleString() : '永久';
+  const exp = s.expiresAt ? fmtTs(s.expiresAt) : '永久';
   const r = s.restrictions || {};
   const extra = s.extra || {};
   const hasPreviewLimit = !!(extra.previewPages && Number(extra.previewPages) > 0);
@@ -206,7 +228,7 @@ function shareCardHtml(s, own, selectable) {
     <div class="tags">${tags}</div>
     <div class="acts">
       <a class="btn ghost sm" href="${link}" target="_blank" rel="noopener">预览</a>
-      <button class="btn ghost sm" data-act="copy">复制链接</button>
+      <button class="btn ghost sm" data-act="copy" data-sid="${s.shareId}">复制链接</button>
       <div class="row-menu">
         <button class="btn ghost sm menu-btn" onclick="toggleRowMenu(event,'${menuId}')">更多 ▾</button>
         <div class="menu-list" id="${menuId}">${shareMenuHtml(s, own)}</div>
@@ -484,10 +506,11 @@ window.editShare = async (id) => {
   const pEnabled = pp > 0;
   // 有效期：判断是预设还是自定义
   let expSelect = '0', expCustom = '';
-  if (s.expiresAt) {
-    const preset = [1,3,7,30].find(n => Math.abs(s.expiresAt - (Date.now() + n * 86400000)) < 3600000);
+  const _expMs = toDateMs(s.expiresAt);
+  if (_expMs) {
+    const preset = [1,3,7,30].find(n => Math.abs(_expMs - (Date.now() + n * 86400000)) < 3600000);
     if (preset) expSelect = String(preset);
-    else { expSelect = 'custom'; expCustom = new Date(s.expiresAt).toISOString().slice(0, 16); }
+    else { expSelect = 'custom'; expCustom = new Date(_expMs).toISOString().slice(0, 16); }
   }
   // 布局（紧凑版）：三列网格 7 字段压成 2 行 + 水印整行 → 内容保护四项一行 → 试看限制单行内联
   $('#editBody').innerHTML = `
@@ -525,18 +548,19 @@ window.editShare = async (id) => {
         <input id="eDur" type="number" value="${Math.round(s.durationSec/60)}">
       </div>
       <div class="efield egrid-2">
-        <div class="ef-hd"><label>水印</label><i>留空不显示</i></div>
-        <input id="eWm" value="${esc(s.watermark)}" placeholder="如：济宁佳印图文 看样文件" />
+        <div class="ef-hd"><label>水印</label><i>预览与下载留痕</i></div>
+        ${watermarkWidgetHtml('eWm')}
       </div>
     </div>
 
     <div class="esec">内容保护</div>
-    <div class="edit-checks">
-      <label><input type="checkbox" id="eCopy" ${s.restrictions.copy?'checked':''}>禁复制</label>
-      <label><input type="checkbox" id="ePrint" ${s.restrictions.print?'checked':''}>禁打印</label>
-      <label><input type="checkbox" id="eDl" ${s.restrictions.download?'checked':''}>禁下载</label>
-      <label><input type="checkbox" id="eSc" ${s.restrictions.screenshot?'checked':''}>防截图</label>
-    </div>
+      <div class="edit-checks">
+        <label><input type="checkbox" id="eCopy" ${s.restrictions.copy?'checked':''}>禁复制</label>
+        <label><input type="checkbox" id="ePrint" ${s.restrictions.print?'checked':''}>禁打印</label>
+        <label><input type="checkbox" id="eDl" ${s.restrictions.download?'checked':''}>禁下载</label>
+        <label><input type="checkbox" id="eSc" ${s.restrictions.screenshot?'checked':''}>防截图</label>
+        <label><input type="checkbox" id="eAf" ${(extra.antiForward)?'checked':''}>链接防转发</label>
+      </div>
 
     <div class="esec esec-sw">
       <span class="et">试看限制</span><span class="hint">仅 PDF / Word 生效</span><i class="ln"></i>
@@ -558,6 +582,7 @@ window.editShare = async (id) => {
   const syncPrev = () => { if (ePrevBox) ePrevBox.classList.toggle('off', !(ePrev && ePrev.checked)); };
   if (ePrev) ePrev.addEventListener('change', syncPrev);
   syncPrev();
+  applyWatermark(s.watermark, 'eWm');
   $('#editModal').classList.add('show');
 };
 $('#saveEdit').onclick = async () => {
@@ -576,10 +601,11 @@ $('#saveEdit').onclick = async () => {
   const protectPassword = previewEnabled ? ($('#ePPwd').value.trim() || null) : null;
   const extra = { previewPages };
   if (protectPassword) extra.protectPassword = protectPassword;
+  extra.antiForward = $('#eAf').checked;
   const body = {
     maxViewers: parseInt($('#eMV').value, 10) || 0, maxViews: parseInt($('#eMO').value, 10) || 0,
     durationSec: (parseInt($('#eDur').value, 10) || 0) * 60, accessCode: $('#eCode').value.trim() || null,
-    authMode: $('#eAuth').value, watermark: $('#eWm').value.trim(),
+    authMode: $('#eAuth').value, watermark: readWatermark('eWm'),
     disableCopy: $('#eCopy').checked, disablePrint: $('#ePrint').checked,
     disableDownload: $('#eDl').checked, disableScreenshot: $('#eSc').checked,
     expiresAt,
@@ -600,7 +626,7 @@ $('#saveEdit').onclick = async () => {
 window.showApprovals = async (id) => {
   const r = await fetch(`/api/admin/${token}/share/${id}/approvals`); const d = await r.json();
   $('#apprBody').innerHTML = d.approvals.length
-    ? d.approvals.map(a => `<div class="share-item" style="margin-bottom:8px"><div class="meta">访客 ${esc(a.viewer_token.slice(0,8))} · ${new Date(a.requested_at).toLocaleString()}</div>
+    ? d.approvals.map(a => `<div class="share-item" style="margin-bottom:8px"><div class="meta">访客 ${esc(a.viewer_token.slice(0,8))} · ${fmtTs(a.requested_at)}</div>
         <div class="acts"><button class="btn sm" onclick="decide('${id}','${a.viewer_token}','approve')">通过</button>
         <button class="btn danger sm" onclick="decide('${id}','${a.viewer_token}','reject')">拒绝</button></div></div>`).join('')
     : '<p class="sub">暂无待授权申请</p>';
@@ -689,7 +715,7 @@ async function initOrg() {
   } else {
     document.querySelectorAll('.tab[data-tab="org"], .tab[data-tab="members"], .tab[data-tab="invite"]').forEach(el => el.style.display = 'none');
   }
-  if (meState.isSuper) { $('#tabAllShares').style.display=''; $('#tabStats').style.display=''; $('#tabDashboard').style.display=''; $('#tabUsers').style.display=''; $('#tabAudit').style.display=''; $('#tabStores').style.display=''; }
+  if (meState.isSuper) { $('#tabAllShares').style.display=''; $('#tabStats').style.display=''; $('#tabDashboard').style.display=''; $('#tabUsers').style.display=''; $('#tabAudit').style.display=''; $('#tabStores').style.display=''; $('#tabGlobals').style.display=''; }
 
   $('#genInvite').addEventListener('click', async () => {
     const r = await fetch('/api/org/invite?userToken=' + encodeURIComponent(orgToken), { method: 'POST' });
@@ -699,7 +725,7 @@ async function initOrg() {
 }
 
 // ---------- 全局标签切换（无刷新；创建分享/设置已合并进本页） ----------
-const superTabs = ['allshares', 'stats', 'dashboard', 'users', 'audit', 'stores'];
+const superTabs = ['allshares', 'stats', 'dashboard', 'users', 'audit', 'stores', 'globals'];
 function highlightSideNav(t) {
   document.querySelectorAll('#sideNav a').forEach(a => a.classList.remove('active'));
   let key = 'mine';
@@ -734,6 +760,8 @@ function switchTab(t) {
     $('#superUsers').style.display = t === 'users' ? 'block' : 'none';
     $('#superAudit').style.display = t === 'audit' ? 'block' : 'none';
     $('#superStores').style.display = t === 'stores' ? 'block' : 'none';
+    $('#superGlobals').style.display = t === 'globals' ? 'block' : 'none';
+    if (t === 'globals' && !panelLoaded.globals) { loadGlobals(); panelLoaded.globals = true; }
     if (t === 'allshares' && !panelLoaded.allshares) { loadAllShares(); panelLoaded.allshares = true; }
     if (t === 'stats' && !panelLoaded.stats) { loadStats(); panelLoaded.stats = true; }
     if (t === 'users' && !panelLoaded.users) { loadUsers(); panelLoaded.users = true; }
@@ -821,7 +849,7 @@ async function loadMembers() {
   if (!d.members || !d.members.length) { box.innerHTML = '<div class="empty">暂无成员</div>'; return; }
   box.innerHTML = `<p class="sub" style="margin-bottom:8px">点击任意成员可查看其分享记录与访问日志，并可直接修改其分享权限。</p>
     <table class="vt"><tr><th>邮箱</th><th>姓名</th><th>角色</th><th>加入时间</th></tr>${d.members.map(m => `<tr class="clickable" onclick="openMemberDetail('${m.id}')" style="cursor:pointer">
-      <td>${esc(m.email)}</td><td>${esc(m.realName || '—')}</td><td>${m.role === 'admin' ? '店长' : '员工'}</td><td>${new Date(m.createdAt).toLocaleString()}</td></tr>`).join('')}</table>`;
+      <td>${esc(m.email)}</td><td>${esc(m.realName || '—')}</td><td>${m.role === 'admin' ? '店长' : '员工'}</td><td>${fmtTs(m.createdAt)}</td></tr>`).join('')}</table>`;
 }
 // 店长：查看本店成员分享与日志明细
 window.openMemberDetail = async (memberId) => {
@@ -842,7 +870,7 @@ window.openMemberDetail = async (memberId) => {
         const ev = l.event || 'progress';
         const label = LOG_EVENT_LABELS[ev] || ev;
         return `<tr>
-          <td class="log-time">${new Date(l.createdAt).toLocaleString()}</td>
+          <td class="log-time">${fmtTs(l.createdAt)}</td>
           <td><span class="${eventTagClass(ev)}">${esc(label)}</span></td>
           <td>${esc(l.shareName || '—')}</td>
           <td>${fmtProg(l.progress)}</td>
@@ -910,7 +938,7 @@ async function loadUsers() {
     ].join(' ');
     return `<tr><td>${esc(u.email)} ${tags}</td><td>${fmtBytes(u.bytes)}</td><td>${u.shareCount}</td>
       <td><select class="org-sel" onchange="assignUserOrg('${u.id}', this.value, '${u.role === 'admin' ? 'admin' : 'member'}')">${orgOpts(u.orgId)}</select></td>
-      <td>${new Date(u.createdAt).toLocaleString()}</td><td>${acts}</td></tr>`;
+      <td>${fmtTs(u.createdAt)}</td><td>${acts}</td></tr>`;
   }).join('') || '<tr><td colspan="6" class="sub">暂无用户</td></tr>';
   $('#superUsers').innerHTML = `<div class="card"><h2>注册用户（${d.users.length}）</h2>
     <table class="vt"><tr><th>邮箱</th><th>占用</th><th>分享数</th><th>所属门店</th><th>注册时间</th><th>操作</th></tr>${rows}</table>
@@ -965,6 +993,82 @@ async function loadStores() {
     allOrgs = []; loadStores();
   };
   await renderStoreList();
+}
+// ---------- 全局参数（超管后台实时调整） ----------
+async function loadGlobals() {
+  const box = $('#superGlobals');
+  if (!box) return;
+  box.innerHTML = `<div class="card"><h2>全局参数</h2>
+    <p class="sub" style="margin:6px 0 14px">超级管理员可在此实时调整系统级参数，保存后立即生效，无需修改服务器配置或重启。参数来源：<b>DB</b>=已在此处覆盖；<b>ENV</b>=读取自环境变量；<b>默认</b>=代码内置默认值。</p>
+    <div id="globalsForm"><p class="sub">加载中…</p></div>
+    <div class="globals-bar">
+      <button class="btn sm" id="saveGlobalsBtn">保存更改</button>
+      <span id="globalsMsg" class="sub"></span>
+    </div>
+  </div>`;
+  try {
+    const r = await fetch('/api/super/settings?userToken=' + encodeURIComponent(orgToken));
+    const d = await r.json().catch(() => ({}));
+    if (d.error) { $('#globalsForm').innerHTML = '<div class="empty">无权访问</div>'; return; }
+    const groups = d.groups || [];
+    window.__globalsItems = {}; window.__globalsInit = {};
+    const form = $('#globalsForm');
+    form.innerHTML = groups.map(g => `
+      <div class="gsec">
+        <div class="gsec-h">${esc(g.group)}</div>
+        ${g.items.map(it => globalsRowHtml(it)).join('')}
+      </div>`).join('');
+    const saveBtn = document.getElementById('saveGlobalsBtn');
+    if (saveBtn) saveBtn.onclick = saveGlobals;
+  } catch (e) {
+    $('#globalsForm').innerHTML = '<div class="empty">加载失败</div>';
+  }
+}
+function globalsRowHtml(it) {
+  window.__globalsItems[it.key] = it;
+  window.__globalsInit[it.key] = it.value;
+  const srcTag = { db: 'DB', env: 'ENV', default: '默认' }[it.source] || it.source;
+  let control;
+  if (it.type === 'bool') {
+    control = `<label class="switch"><input type="checkbox" id="g_${it.key}" ${it.value ? 'checked' : ''}/> <span>${it.value ? '开启' : '关闭'}</span></label>`;
+  } else if (it.type === 'enum') {
+    control = `<select id="g_${it.key}" class="inp">${it.options.map(o => `<option value="${o}" ${o === it.value ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+  } else if (it.type === 'int') {
+    control = `<input id="g_${it.key}" type="number" class="inp" value="${it.value}" />`;
+  } else {
+    control = `<input id="g_${it.key}" type="text" class="inp" value="${esc(String(it.value))}" placeholder="${it.default ? '默认：' + esc(String(it.default)) : ''}" />`;
+  }
+  const defaultNote = it.source === 'default' && it.default !== '' ? '（默认：' + esc(String(it.default)) + '）' : '';
+  return `<div class="grow">
+    <div class="grow-h"><span class="grow-label">${esc(it.label)}</span><span class="tag src-${it.source}">${srcTag}</span></div>
+    <div class="grow-ctl">${control}</div>
+    ${it.help ? `<div class="grow-help">${esc(it.help)}${defaultNote}</div>` : ''}
+  </div>`;
+}
+async function saveGlobals() {
+  const msg = document.getElementById('globalsMsg');
+  const settings = {};
+  for (const key in window.__globalsInit) {
+    const el = document.getElementById('g_' + key);
+    if (!el) continue;
+    const item = window.__globalsItems[key];
+    let val;
+    if (item.type === 'bool') val = el.checked;
+    else if (item.type === 'int') val = Number(el.value);
+    else val = el.value;
+    if (val !== window.__globalsInit[key]) settings[key] = val;
+  }
+  if (!Object.keys(settings).length) { if (msg) msg.textContent = '没有改动'; return; }
+  if (msg) msg.textContent = '保存中…';
+  const r = await fetch('/api/super/settings?userToken=' + encodeURIComponent(orgToken), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings })
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { if (msg) msg.textContent = '失败：' + (d.message || r.statusText); return; }
+  if (msg) msg.textContent = '已保存 ' + Object.keys(settings).length + ' 项，已立即生效';
+  toast('全局参数已更新');
+  panelLoaded.globals = false;
+  loadGlobals();
 }
 async function renderStoreList() {
   const wrap = document.getElementById('storeList');
@@ -1182,7 +1286,7 @@ async function fetchAudit() {
     const rows = (d.logs || []).map(l => {
       const actor = l.actorEmail ? esc(l.actorRealName || l.actorEmail) : '系统';
       return `<tr>
-        <td>${new Date(l.createdAt).toLocaleString()}</td>
+        <td>${fmtTs(l.createdAt)}</td>
         <td>${esc(auditActionName(l.action))}</td>
         <td>${formatAuditTarget(l.action, l.target, l.detail)}</td>
         <td>${formatAuditDetail(l.action, l.detail)}</td>
@@ -1221,11 +1325,12 @@ async function loadFiles() {
     </div>
     <div class="file-batchbar" id="fileBatchBar" style="display:none">
       <span id="fileSelCount" class="sub">已选 0 项</span>
+      <button class="btn sm act-take" id="fileBatchDownload">批量取回</button>
       <button class="btn danger sm" id="fileBatchDelete">批量删除</button>
       <button class="btn ghost sm" id="fileClearSel">取消选择</button>
     </div>
     <div id="fileGrid"></div>
-    <p class="sub" style="margin-top:10px">说明：替换文件会覆盖原文件内容，但<b>分享链接保持不变</b>，客户始终看到最新文件；仅当文件未被任何生效分享引用时方可删除。可勾选多行批量删除、点击列名排序、用上方搜索框过滤。</p>
+    <p class="sub" style="margin-top:10px">说明：替换文件会覆盖原文件内容，但<b>分享链接保持不变</b>，客户始终看到最新文件；仅当文件未被任何生效分享引用时方可删除。可勾选多行<b>批量取回/删除</b>、点击列名排序、用上方搜索框过滤。每行「取回」按钮可把原文件下载回本地（零损画质）。</p>
   </div>`;
   const search = document.getElementById('fileSearch');
   search.addEventListener('input', () => renderFileGrid());
@@ -1233,6 +1338,7 @@ async function loadFiles() {
   if (ownerInput) ownerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderFileGrid(true); });
   document.getElementById('fileRefresh').onclick = () => renderFileGrid(true);
   document.getElementById('fileBatchDelete').onclick = batchDeleteFiles;
+  document.getElementById('fileBatchDownload').onclick = batchDownloadFiles;
   document.getElementById('fileClearSel').onclick = () => { selectedFileIds.clear(); renderFileGrid(); };
   await renderFileGrid(true);
 }
@@ -1292,10 +1398,11 @@ async function renderFileGrid(fetchFirst) {
       <td class="c-sel"><input type="checkbox" class="file-chk" data-fid="${f.fileId}" ${checked} /></td>
       <td class="fn"><span class="fic">${ic}</span>${esc(f.name)}</td>
       <td>${fmtBytes(f.size)}</td>
-      <td>${new Date(f.createdAt).toLocaleDateString()}</td>
+      <td>${fmtDay(f.createdAt)}</td>
       <td>${shareCell}</td>
       ${superCol ? `<td>${ownerCell}</td>` : ''}
       <td class="acts-cell">
+        <button class="btn sm act-take" data-act="download" data-fid="${f.fileId}">取回</button>
         <div class="row-menu">
           <button class="btn ghost sm menu-btn" onclick="toggleRowMenu(event,'${menuId}')">更多 ▾</button>
           <div class="menu-list" id="${menuId}">${fileMenuHtml(f)}</div>
@@ -1327,7 +1434,7 @@ async function renderFileGrid(fetchFirst) {
 function fileMenuItems(f) {
   return [
     { act: 'rename', label: '重命名' },
-    { act: 'download', label: '下载' },
+    { act: 'download', label: '取回' },
     { act: 'previewFile', label: '预览' },
     { act: 'shareFromFile', label: '一键分享' },
     { act: 'replace', label: '替换文件' },
@@ -1472,11 +1579,38 @@ window.downloadFile = (fileId) => {
 };
 window.previewFile = (fileId) => {
   const m = fileMap[fileId];
-  // 有生效分享时直接打开专业文档查看器（可正确渲染 PDF/图片/源文件预览）；
-  // 孤儿文件（无分享）才回退到原始预览端点。
-  if (m && m.shareId) { window.open('/viewer.html?share=' + m.shareId, '_blank'); return; }
-  window.open('/api/files/' + fileId + '/preview?userToken=' + encodeURIComponent(orgToken), '_blank');
+  // 有生效分享时直接挂专业文档查看器（可正确渲染 PDF/图片/源文件预览，且带缩放/拖移/捏合）；
+  // 孤儿文件（无分享）回退到原始预览端点（图片为原图、其它为栅格预览图，至少可看）。
+  let src, name = (m && m.name) || '文件预览';
+  if (m && m.shareId) src = '/viewer.html?share=' + m.shareId;
+  else src = '/api/files/' + fileId + '/preview?userToken=' + encodeURIComponent(orgToken);
+  openFilePreview(src, name);
 };
+function openFilePreview(src, name) {
+  const modal = document.getElementById('filePreviewModal');
+  const frame = document.getElementById('fpFrame');
+  const label = document.getElementById('fpName');
+  if (label) label.textContent = name || '文件预览';
+  frame.src = src;
+  modal.classList.add('show');
+}
+window.closeFilePreview = () => {
+  const modal = document.getElementById('filePreviewModal');
+  const frame = document.getElementById('fpFrame');
+  if (!modal) return;
+  modal.classList.remove('show');
+  frame.src = 'about:blank';   // 关闭即卸载，停止加载、释放资源
+};
+// 点击遮罩空白处 / 按 Esc 关闭预览弹窗
+(function bindFilePreviewModal() {
+  const modal = document.getElementById('filePreviewModal');
+  if (!modal || modal.dataset.fpBound === '1') return;
+  modal.dataset.fpBound = '1';
+  modal.addEventListener('click', (e) => { if (e.target === modal) window.closeFilePreview(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal.classList.contains('show')) window.closeFilePreview();
+  });
+})();
 window.shareFromFile = async (fileId) => {
   try {
     const r = await fetch('/api/files/' + fileId + '/share?userToken=' + encodeURIComponent(orgToken), { method: 'POST' });
@@ -1513,6 +1647,13 @@ window.batchDeleteFiles = async () => {
     lastFiles = lastFiles.filter(f => !okIds.has(f.fileId));
     renderFileGrid();
   } catch (e) { toast('失败：' + e.message); }
+};
+// 批量取回：把选中文件逐一下载回本地（错峰触发，避免浏览器一次性拦截多文件下载）
+window.batchDownloadFiles = () => {
+  const ids = Array.from(selectedFileIds);
+  if (!ids.length) return;
+  toast('正在取回 ' + ids.length + ' 个文件…（若浏览器询问，请允许本站点下载多个文件）');
+  ids.forEach((fid, i) => setTimeout(() => window.downloadFile(fid), i * 350));
 };
 window.replaceFile = (fileId) => {
   const inp = document.getElementById('replaceFileInput');
@@ -1571,7 +1712,7 @@ function loadDashboard() {
       const scopeTxt = d.scope === 'global' ? '（全局）' : '（仅本人）';
       const top = (d.topShares || []).map(s => `<tr><td>${esc(s.name)}</td><td>${esc(s.ownerEmail || '匿名')}</td><td>${s.opens}</td><td>${s.viewers}</td></tr>`).join('') || '<tr><td colspan="4" class="sub">暂无</td></tr>';
       const rv = (d.recentViewers || []).map(v => {
-        const last = v.lastAt ? new Date(v.lastAt).toLocaleString() : '—';
+        const last = v.lastAt ? fmtTs(v.lastAt) : '—';
         const loc = v.loc || '—';
         return `<tr><td>${esc((v.viewerToken || '').slice(0, 8))}</td><td>${esc(v.shareName || '—')}</td><td>${esc(v.ownerEmail || '—')}</td><td>${v.events} 次</td><td>${esc(loc)}</td><td>${esc(v.device || '—')}</td><td>${last}</td></tr>`;
       }).join('') || '<tr><td colspan="7" class="sub">暂无访客</td></tr>';
@@ -1652,6 +1793,82 @@ function applyRestrictionVisibility(kind) {
   document.querySelectorAll('.rest-shot').forEach(e => e.classList.toggle('hidden', !(isDoc || isImage)));
 }
 
+// ----- 水印控件（创建 / 编辑 / 默认偏好三处共用）-----
+// 读取当前水印设置，返回 {mode,text,dl}；none 时返回简化对象
+function readWatermark(prefix) {
+  const modeEl = document.querySelector(`input[name="${prefix}Mode"]:checked`);
+  const mode = modeEl ? modeEl.value : 'none';
+  if (mode === 'none') return { mode: 'none', text: '', dl: false };
+  const tEl = document.getElementById(prefix + 'Text');
+  const text = tEl ? (tEl.value || '').trim() : '';
+  const dlEl = document.getElementById(prefix + 'Dl');
+  return { mode, text, dl: !!(dlEl && dlEl.checked) };
+}
+// 把一份水印设置写回控件（w 可为 null / '' / 旧版纯字符串 / 对象）
+function applyWatermark(w, prefix) {
+  let mode = 'none', text = '', dl = false;
+  if (w) {
+    if (typeof w === 'string') { if (w.length) { mode = 'static'; text = w; } }
+    else if (w.mode && w.mode !== 'none') { mode = w.mode; text = w.text || ''; dl = !!w.dl; }
+  }
+  const r = document.querySelector(`input[name="${prefix}Mode"][value="${mode}"]`);
+  if (r) r.checked = true;
+  const t = document.getElementById(prefix + 'Text'); if (t) t.value = text;
+  const d = document.getElementById(prefix + 'Dl'); if (d) d.checked = dl;
+  syncWatermarkUI(prefix);
+}
+// 根据当前类型联动置灰 / 提示文案（选项常显，保证高度稳定、功能一眼可见）
+function syncWatermarkUI(prefix) {
+  const modeEl = document.querySelector(`input[name="${prefix}Mode"]:checked`);
+  const mode = modeEl ? modeEl.value : 'none';
+  const on = mode !== 'none';
+  const tw = document.getElementById(prefix + 'TextWrap'); if (tw) tw.style.display = '';
+  const dw = document.getElementById(prefix + 'DlWrap'); if (dw) dw.style.display = '';
+  const inp = document.getElementById(prefix + 'Text');
+  const dl = document.getElementById(prefix + 'Dl');
+  if (inp) {
+    inp.disabled = !on;
+    inp.placeholder = on
+      ? (mode === 'dynamic' ? '水印前缀，如：内部资料 严禁外传' : '水印文字，如：内部资料 严禁外传')
+      : '选择水印类型后可填写';
+  }
+  if (dl) dl.disabled = !on;
+  if (dw) dw.classList.toggle('is-off', !on);
+  const lbl = document.getElementById(prefix + 'TextLabel');
+  if (lbl) lbl.textContent = mode === 'dynamic' ? '水印前缀文字' : '水印文字';
+  const hint = document.getElementById(prefix + 'Hint');
+  if (hint) hint.textContent = !on
+    ? '未启用水印，预览与下载均不留痕'
+    : (mode === 'dynamic' ? '自动叠加访客 ID 与实时时间，可追溯来源' : '叠加在预览页面上，留空则不显示');
+}
+// 生成可嵌入的控件 HTML（editShare 弹窗用）
+function watermarkWidgetHtml(prefix) {
+  return `<div class="wm-widget">
+    <div class="chips wm-types">
+      <label><input type="radio" name="${prefix}Mode" value="none" checked /> <span>无水印</span></label>
+      <label><input type="radio" name="${prefix}Mode" value="static" /> <span>静态水印</span></label>
+      <label><input type="radio" name="${prefix}Mode" value="dynamic" /> <span>动态水印</span></label>
+    </div>
+    <div class="wm-textwrap" id="${prefix}TextWrap">
+      <input id="${prefix}Text" maxlength="40" placeholder="水印文字，如：内部资料 严禁外传" />
+      <small id="${prefix}Hint" class="wm-hint"></small>
+    </div>
+    <label class="opt-row" id="${prefix}DlWrap">
+      <input type="checkbox" id="${prefix}Dl" />
+      <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF / Word</span></span>
+    </label>
+  </div>`;
+}
+// 水印类型切换时联动（创建 / 编辑 / 默认偏好三处共用，事件委托）
+document.addEventListener('change', function (e) {
+  const t = e.target;
+  if (t && t.name && /Mode$/.test(t.name) && t.type === 'radio') {
+    syncWatermarkUI(t.name.replace(/Mode$/, ''));
+  }
+});
+// 首次进入：把静态控件同步到"未启用"的置灰态（避免看起来像可填/可勾）
+['wm', 'setWm'].forEach(function (p) { syncWatermarkUI(p); });
+
 // 默认分享参数：从本地缓存（设置页保存）应用到表单
 function applySharePrefs() {
   try {
@@ -1663,7 +1880,7 @@ function applySharePrefs() {
       const allowed = ['1','3','7','30','0','custom'];
       setExpire(allowed.includes(v) ? v : '7', p.expireCustom);
     }
-    if (p.watermark !== undefined) { const w = $('#watermark'); if (w) w.value = p.watermark; }
+    if (p.watermark !== undefined) applyWatermark(p.watermark, 'wm');
     if (p.copy !== undefined) { const c = $('#rCopy'); if (c) c.checked = !!p.copy; }
     if (p.print !== undefined) { const pr = $('#rPrint'); if (pr) pr.checked = !!p.print; }
     if (p.download !== undefined) { const d = $('#rDownload'); if (d) d.checked = !!p.download; }
@@ -1676,6 +1893,7 @@ function applySharePrefs() {
     if (p.maxViews !== undefined) { const mx = $('#maxViews'); if (mx) mx.value = String(p.maxViews || 0); }
     if (p.duration !== undefined) { const du = $('#duration'); if (du) du.value = String(p.duration || 0); }
     if (p.screenshot !== undefined) { const ss = $('#rScreenshot'); if (ss) ss.checked = !!p.screenshot; }
+    if (p.antiForward !== undefined) { const af = $('#antiForward'); if (af) af.checked = !!p.antiForward; }
     const pe = $('#previewEnabled'), pp = $('#previewPages'), pwp = $('#protectPassword');
     const hasPreview = !!(p.previewPages && parseInt(p.previewPages, 10) > 0);
     if (pe) pe.checked = hasPreview;
@@ -1684,17 +1902,28 @@ function applySharePrefs() {
     if (pe) pe.dispatchEvent(new Event('change'));
   } catch (e) {}
 }
+// 超管设置的防盗用全局默认：仅当用户自身未设置对应偏好时，作为创建分享的初始默认值。
+function globalPrefsFallback(g) {
+  return {
+    watermark: { mode: g.default_watermark_mode || 'none', text: '', dl: !!g.default_download_watermark },
+    antiForward: !!g.default_antiforward
+  };
+}
 async function loadAndApplyPrefs() {
   const tk = localStorage.getItem('userToken');
   if (!tk) return;
+  let prefs = null;
   try {
     const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(tk), { cache: 'no-store' });
-    if (!r.ok) return;
-    const d = await r.json();
-    if (d.prefs && typeof d.prefs === 'object') {
-      try { localStorage.setItem('sharePrefs', JSON.stringify(d.prefs)); } catch (e) {}
-    }
+    if (r.ok) { const d = await r.json(); if (d.prefs && typeof d.prefs === 'object') prefs = d.prefs; }
   } catch (e) {}
+  // 叠加超管全局默认（用户自身偏好优先，放在后面覆盖）
+  try {
+    const gr = await fetch('/api/globals/public');
+    const g = await gr.json();
+    prefs = Object.assign({}, globalPrefsFallback(g), prefs || {});
+  } catch (e) {}
+  if (prefs) { try { localStorage.setItem('sharePrefs', JSON.stringify(prefs)); } catch (e) {} }
   applySharePrefs();
 }
 window.applySharePrefs = applySharePrefs;
@@ -1759,6 +1988,7 @@ async function uploadAndShare() {
     const protectPassword = previewEnabled ? ($('#protectPassword').value.trim() || null) : null;
     const extra = { previewPages };
     if (protectPassword) extra.protectPassword = protectPassword;
+    extra.antiForward = $('#antiForward').checked;
     const settings = {
       name: $('#name').value || selectedFile.name,
       accessCode: $('#code').value.trim() || null,
@@ -1766,7 +1996,7 @@ async function uploadAndShare() {
       maxViews: parseInt($('#maxViews').value, 10) || 0,
       durationSec: (parseInt($('#duration').value, 10) || 0) * 60,
       authMode: (document.querySelector('#authChips button.active') || { dataset: { val: 'open' } }).dataset.val,
-      watermark: $('#watermark').value.trim(),
+      watermark: readWatermark('wm'),
       disableCopy: $('#rCopy').checked, disablePrint: $('#rPrint').checked,
       disableDownload: $('#rDownload').checked, disableScreenshot: $('#rScreenshot').checked,
       extra,
@@ -1880,12 +2110,16 @@ function setExpire(val, dateStr) {
   }));
 })();
 const previewEnabled = document.getElementById('previewEnabled');
-if (previewEnabled) previewEnabled.addEventListener('change', () => {
-  const pp = document.getElementById('previewPages');
-  const pwp = document.getElementById('protectPassword');
-  if (pp) pp.disabled = !previewEnabled.checked;
-  if (pwp) pwp.disabled = !previewEnabled.checked;
-});
+if (previewEnabled) {
+  const syncPreviewFields = () => {
+    const pp = document.getElementById('previewPages');
+    const pwp = document.getElementById('protectPassword');
+    if (pp) pp.disabled = !previewEnabled.checked;
+    if (pwp) pwp.disabled = !previewEnabled.checked;
+  };
+  previewEnabled.addEventListener('change', syncPreviewFields);
+  syncPreviewFields();
+}
 const copyLinkBtn = document.getElementById('copyLink');
 if (copyLinkBtn) copyLinkBtn.addEventListener('click', () => { navigator.clipboard.writeText($('#linkInput').value); toast('链接已复制'); });
 function closeResult() { $('#result').classList.remove('show'); }
@@ -1945,12 +2179,12 @@ async function loadSettings() {
     $('#setRealName').value = d.realName || '';
     const orgSec = $('#setOrgSec');
     if (orgSec) { $('#setOrg').value = d.orgName || '—'; orgSec.style.display = d.orgName ? 'block' : 'none'; }
-    const DEFAULT_PREFS = { expire: '7', watermark: '', copy: true, print: true, download: true, accessCode: '', authMode: 'open', maxViewers: 0, maxViews: 0, duration: 0, screenshot: false, previewPages: 0, protectPassword: '' };
+    const DEFAULT_PREFS = { expire: '7', watermark: { mode: 'none', text: '', dl: false }, copy: true, print: true, download: true, accessCode: '', authMode: 'open', maxViewers: 0, maxViews: 0, duration: 0, screenshot: false, antiForward: false, previewPages: 0, protectPassword: '' };
     const p = Object.assign({}, DEFAULT_PREFS, d.prefs || {});
     $('#setExpire').value = String(p.expire);
     $('#setAuthMode').value = p.authMode || 'open';
     $('#setCode').value = p.accessCode || '';
-    $('#setWatermark').value = p.watermark || '';
+    applyWatermark(p.watermark, 'setWm');
     $('#setMaxViewers').value = toNum(p.maxViewers);
     $('#setMaxViews').value = toNum(p.maxViews);
     $('#setDuration').value = toNum(p.duration);
@@ -1959,6 +2193,7 @@ async function loadSettings() {
     $('#setPrint').checked = !!p.print;
     $('#setDownload').checked = !!p.download;
     $('#setScreenshot').checked = !!p.screenshot;
+    const setAf = $('#setAntiForward'); if (setAf) setAf.checked = !!p.antiForward;
     $('#setOldPw').value = ''; $('#setNewPw').value = ''; $('#setNewPw2').value = '';
     if (typeof window.afterLogin === 'function') window.afterLogin(d.realName || d.email);
   } catch (e) {
@@ -1975,9 +2210,9 @@ async function saveSettings() {
   if (newPw && newPw !== newPw2) { msg.textContent = '两次输入的新密码不一致'; return; }
   const prefs = {
     expire: $('#setExpire').value, authMode: $('#setAuthMode').value, accessCode: $('#setCode').value.trim(),
-    watermark: $('#setWatermark').value.trim(), maxViewers: toNum($('#setMaxViewers').value), maxViews: toNum($('#setMaxViews').value),
+    watermark: readWatermark('setWm'), maxViewers: toNum($('#setMaxViewers').value), maxViews: toNum($('#setMaxViews').value),
     duration: toNum($('#setDuration').value), previewPages: toNum($('#setPreviewPages').value), protectPassword: $('#setProtectPassword').value.trim(),
-    copy: $('#setCopy').checked, print: $('#setPrint').checked, download: $('#setDownload').checked, screenshot: $('#setScreenshot').checked
+    copy: $('#setCopy').checked, print: $('#setPrint').checked, download: $('#setDownload').checked, screenshot: $('#setScreenshot').checked, antiForward: $('#setAntiForward').checked
   };
   const btn = $('#setSave'); btn.disabled = true;
   try {

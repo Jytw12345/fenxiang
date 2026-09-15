@@ -107,11 +107,27 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .tile{border:1px solid var(--line);border-radius:13px;background:var(--panel);padding:11px 13px;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow-sm);transition:.15s;}
 .tile:hover{border-color:#d8e0f5;box-shadow:0 4px 14px rgba(31,41,55,.06);}
 .tile-wide{grid-column:1 / -1;}
-.tile-hd{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;color:var(--ink);}
+.tile-hd{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--ink);min-width:0;}
 .tile-hd .ic{width:24px;height:24px;border-radius:7px;background:#eef1ff;color:var(--brand);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;}
-.tile-hd small{color:var(--muted);font-weight:400;font-size:11px;}
+.tile-hd .ttl{white-space:nowrap;flex-shrink:0;letter-spacing:.2px;}
+.tile-hd small{color:var(--muted);font-weight:400;font-size:10.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .tile-bd{display:flex;flex-direction:column;gap:9px;}
 .tile-bd .pfield{margin-bottom:0;}
+.tile .wm-textwrap{display:flex;flex-direction:column;gap:4px;}
+.tile .wm-textwrap input{font-size:12px;padding:6px 9px;border-radius:8px;}
+.tile .wm-textwrap .wm-hint{margin-top:0;}
+/* 选项行：勾选框 + 主文案（+ 次说明），说明独占一行不挤压主体 */
+.opt-row{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;cursor:pointer;user-select:none;transition:.15s;}
+.opt-row:hover{border-color:#cdd6f5;}
+.opt-row:has(>input:checked){border-color:var(--brand);background:#f6f8ff;}
+.opt-row>input[type="checkbox"]{width:15px;height:15px;margin:0;accent-color:var(--brand);flex-shrink:0;}
+.opt-row>.otxt{display:flex;flex-direction:column;gap:1px;min-width:0;line-height:1.35;}
+.opt-row .ot{font-size:11.5px;font-weight:600;color:var(--muted);}
+.opt-row:has(>input:checked) .ot{color:var(--ink);}
+.opt-row .os{font-size:10.5px;color:var(--muted);}
+.opt-row.is-off{opacity:.55;}
+.opt-row.is-off:hover{border-color:var(--line);}
+.opt-row.is-off:has(>input:checked){border-color:var(--line);background:#fff;}
 /* 短内容字段：按内容宽度，不拉满整行 */
 #code{max-width:170px;}
 
@@ -148,14 +164,12 @@ input::placeholder,textarea::placeholder{color:#9aa2b8;}
 .chips label:hover{border-color:#cdd6f5;}
 .chips label:has(input:checked){border-color:var(--brand);background:#eef1ff;color:var(--brand);font-weight:600;}
 .chips input{width:auto;accent-color:var(--brand);}
+.chips.wm-types{grid-template-columns:repeat(3,1fr);}
+.wm-widget{display:flex;flex-direction:column;gap:8px;}
+.wm-hint{display:block;color:var(--muted);font-size:10.5px;margin-top:3px;line-height:1.45;}
+.frow-wm{align-items:flex-start;}
 
-/* 预览限制：紧凑一行 */
-.preview-limit .switch-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--ink);cursor:pointer;user-select:none;}
-.preview-limit .switch-row>input[type="checkbox"]{width:auto;accent-color:var(--brand);flex-shrink:0;width:15px;height:15px;}
-.preview-limit .switch-row>span{display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:var(--muted);}
-.preview-limit .switch-row:has(>input:checked)>span{color:var(--ink);}
-.preview-limit .switch-row input[type="number"]{width:42px;text-align:center;padding:5px 2px;font-size:12px;}
-.preview-limit .switch-row input[type="text"]{width:90px;padding:5px 7px;font-size:12px;}
+/* 预览限制：选项行（.opt-row）+ 字段网格，不再使用内联长句 */
 
 @media (max-width:780px){
   .pgrid2,.triple-row.sec-grid{grid-template-columns:1fr;}
@@ -186,8 +200,6 @@ input::placeholder,textarea::placeholder{color:#9aa2b8;}
   .drop{flex-direction:column;text-align:center;padding:14px;}
   .drop .icon{margin:0 auto;}
   .drop .txt{text-align:center;}
-  .preview-limit .switch-row>span{flex-direction:column;align-items:flex-start;gap:6px;}
-  .preview-limit .switch-row input[type="number"],.preview-limit .switch-row input[type="text"]{width:100%;}
   .pcard{padding:12px;}
 }
 
@@ -236,6 +248,20 @@ input::placeholder,textarea::placeholder{color:#9aa2b8;}
 .tag.on{background:#e8f7ee;color:var(--ok);}
 .tag.off{background:#fdecec;color:var(--danger);}
 .tag.blue{background:#e8f4ff;color:#1a6fc4;}
+/* 超管全局参数 */
+.gsec{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px;background:#fff;}
+.gsec-h{font-size:12px;font-weight:700;color:var(--ink);margin-bottom:10px;letter-spacing:.3px;}
+.grow{padding:9px 0;border-top:1px dashed #eef0f4;}
+.grow:first-child{border-top:none;}
+.grow-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
+.grow-label{font-size:12.5px;font-weight:600;color:#374151;}
+.grow-ctl{margin:2px 0 2px;}
+.grow-ctl .inp{width:100%;max-width:360px;}
+.grow-help{font-size:10.5px;color:var(--muted);line-height:1.5;margin-top:3px;}
+.globals-bar{display:flex;align-items:center;gap:14px;margin-top:8px;}
+.tag.src-db{background:#e8f4ff;color:#1a6fc4;}
+.tag.src-env{background:#fff4e5;color:#b9690a;}
+.tag.src-default{background:#eef1f7;color:var(--muted);}
 /* 查看者明细（卡片式） */
 table.vt{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
 table.vt th,table.vt td{padding:7px 8px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top;}
@@ -759,3 +785,25 @@ img { max-width: 100%; }
   .card-grid,
   .card-grid.with-owner{ grid-template-columns:1fr; }
 }
+
+/* ===== 文件预览弹窗（iframe 承载底层查看器，含缩放/拖移/捏合） ===== */
+/* 用 .modal .fp-box 提高权重，覆盖通用 .modal .box 的窄宽/居中/内边距 */
+.modal .fp-box{
+  max-width:96vw; width:min(1120px,96vw); height:min(90vh,880px); max-height:90vh;
+  display:flex; flex-direction:column; padding:0; overflow:hidden; text-align:left; background:#fff;
+}
+.fp-hd{
+  flex:0 0 auto; display:flex; align-items:center; min-width:0;
+  padding:11px 46px 11px 16px; border-bottom:1px solid #eceef2;
+  font-size:15px; font-weight:600; color:var(--text);
+}
+.fp-name{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fp-frame{ flex:1 1 auto; width:100%; height:100%; border:0; background:#fff; }
+
+/* 文件管理：行内「取回」与批量「批量取回」主操作按钮（品牌蓝高亮，区别于次要的「更多」） */
+.acts-cell .act-take,
+.file-batchbar .act-take{
+  background:var(--brand,#2b6cff); color:#fff; border-color:var(--brand,#2b6cff); margin-right:6px;
+}
+.acts-cell .act-take:hover,
+.file-batchbar .act-take:hover{ filter:brightness(.95); }

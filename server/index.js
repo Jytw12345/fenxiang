@@ -8,7 +8,9 @@ const db = require('./db');
 const config = require('./config');
 const storage = require('./storage');
 const preview = require('./preview');
+const { watermarkFile } = require('./watermark');
 const { verifySupabaseToken } = require('./supabase_auth');
+const globals = require('./globals');
 
 const UPLOAD_DIR = db.UPLOAD_DIR;
 const PORT = config.PORT;
@@ -55,7 +57,7 @@ function enqueuePreview(file) {
   if (previewJobs.has(file.id)) return previewJobs.get(file.id);
   const job = (async () => {
     try {
-      if (config.PREVIEW_ENABLED === false) return null;
+      if (globals.get('preview_enabled') === false) return null;
       await previewAcquire();
       try {
         const buf = await storage.readBuffer(file.storedName);
@@ -85,11 +87,11 @@ function enqueuePreview(file) {
 const regAttempts = new Map(); // key -> { count, first }
 function regSweep() {
   const now = Date.now();
-  for (const [k, v] of regAttempts) if (now - v.first > config.REG_WINDOW_MS) regAttempts.delete(k);
+  for (const [k, v] of regAttempts) if (now - v.first > globals.get('reg_window_ms')) regAttempts.delete(k);
 }
 function regCount(key) {
   const e = regAttempts.get(key);
-  if (!e || Date.now() - e.first > config.REG_WINDOW_MS) { regAttempts.set(key, { count: 0, first: Date.now() }); return 0; }
+  if (!e || Date.now() - e.first > globals.get('reg_window_ms')) { regAttempts.set(key, { count: 0, first: Date.now() }); return 0; }
   return e.count;
 }
 function regHit(key) {
@@ -112,8 +114,12 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 function sendHtml(res, code, html) {
-  res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', ...frameGuardHeaders() });
   res.end(html);
+}
+// 防嵌套：禁止被其它站点以 iframe 方式嵌入（防套壳盗用）。同源嵌入（如后台预览）不受影响。
+function frameGuardHeaders() {
+  return { 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "frame-ancestors 'self'" };
 }
 // 跨域头：前端（GitHub Pages 等异源）调用 API 必需。无 cookie，故不开启 credentials。
 function corsHeaders(req) {
@@ -159,7 +165,9 @@ function serveStatic(req, res, urlPath) {
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
     const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    const h = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    if (ext === '.html') Object.assign(h, frameGuardHeaders());
+    res.writeHead(200, h);
     res.end(data);
   });
 }
@@ -266,6 +274,22 @@ async function resolveShareForAdmin(token, shareId) {
   return null;
 }
 // 批量改权限的「只改传入字段」合并：patch 里没出现的键一律沿用分享原值。
+// 水印字段兼容层：DB 中 watermark 存 JSON 字符串（{mode,text,dl}），旧数据可能是纯字符串（按静态处理）
+function parseWatermark(v) {
+  if (!v) return null;
+  if (typeof v === 'string') {
+    if (v[0] === '{') { try { const o = JSON.parse(v); if (o && o.mode) return o; } catch (e) {} }
+    if (v.length) return { mode: 'static', text: v, dl: false };
+    return null;
+  }
+  if (v && v.mode && v.mode !== 'none') return v;
+  return null;
+}
+function normWatermark(w) {
+  if (!w || !w.mode || w.mode === 'none') return '';
+  return JSON.stringify({ mode: w.mode, text: w.text || '', dl: !!w.dl });
+}
+
 // 这样批量操作不会顺手把每个分享各不相同的访问码 / 水印 / 验证方式覆盖成同一个值。
 // 注意用 hasOwnProperty 判存在（而非判真值），因为 0 与 null 都是合法取值：
 // maxViewers=0 表示「不限」，expiresAt=null 表示「永久有效」。
@@ -281,7 +305,7 @@ function bulkMergeSettings(share, patch) {
     expiresAt: has('expiresAt') ? (p.expiresAt ? Number(p.expiresAt) : null) : share.expires_at,
     accessCode: has('accessCode') ? (p.accessCode || null) : share.access_code,
     authMode: has('authMode') ? p.authMode : share.auth_mode,
-    watermark: has('watermark') ? (p.watermark || '') : share.watermark,
+    watermark: has('watermark') ? normWatermark(p.watermark) : share.watermark,
     disableCopy: has('disableCopy') ? !!p.disableCopy : !!share.disable_copy,
     disablePrint: has('disablePrint') ? !!p.disablePrint : !!share.disable_print,
     disableDownload: has('disableDownload') ? !!p.disableDownload : !!share.disable_download,
@@ -339,7 +363,7 @@ async function grantAccess(req, share, viewerToken) {
   await db.logOpen({ shareId: share.id, viewerToken, ip, ua, now: nowMs() });
   return {
     ok: true, accessToken: token, expiresIn: ttl, viewerToken,
-    kind: share.kind, name: share.name, watermark: share.watermark,
+    kind: share.kind, name: share.name, watermark: parseWatermark(share.watermark),
     restrictions: { copy: !!share.disable_copy, print: !!share.disable_print, download: !!share.disable_download, screenshot: !!share.disable_screenshot },
     previewPages: Number(extraObj.previewPages) || 0,
     needProtect: needUnlock
@@ -389,7 +413,7 @@ async function finalizeWechat(state, openid, nickname) {
 
   if (state.purpose === 'login') {
     const token = uuid();
-    await db.createUserToken({ token, userId, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
+    await db.createUserToken({ token, userId, createdAt: nowMs(), expiresAt: nowMs() + globals.get('user_token_ttl_ms') });
     await db.setWechatLoginToken({ token, state: state.state });
     return { kind: 'login', token, email: nickname || '微信用户' };
   }
@@ -433,14 +457,18 @@ const server = http.createServer(async (req, res) => {
       // 2) 频率限制：同一 IP / 同一邮箱在窗口期内最多注册 N 次
       const regIp = clientIp(req);
       regSweep();
-      if (regIp && regCount('ip:' + regIp) >= config.REG_IP_LIMIT)
+      if (regIp && regCount('ip:' + regIp) >= globals.get('reg_ip_limit'))
         return sendJson(res, 429, { error: 'too_many_registrations', message: '当前网络 24 小时内注册次数过多，请稍后再试或联系管理员' });
-      if (regCount('email:' + email) >= config.REG_EMAIL_LIMIT)
+      if (regCount('email:' + email) >= globals.get('reg_email_limit'))
         return sendJson(res, 429, { error: 'too_many_registrations', message: '该邮箱 24 小时内注册尝试过多，请稍后再试' });
       // 3) 邀请制：开启后普通邮箱必须携带有效邀请码（超级管理员不受限）
       const isSuper = config.SUPER_ADMIN_EMAILS.includes(email);
-      if (config.INVITE_ONLY && !isSuper && !inviteCode)
+      if (globals.get('invite_only') && !isSuper && !inviteCode)
         return sendJson(res, 400, { error: 'invite_required', message: '当前为邀请制注册，请填写有效的公司邀请码' });
+      // 4) 注册域名限制：设置了允许域名后，仅该域名邮箱可自助注册（超级管理员不受限）
+      const allowedDomain = globals.get('register_domain');
+      if (allowedDomain && !isSuper && email.split('@')[1] !== allowedDomain.toLowerCase())
+        return sendJson(res, 400, { error: 'domain_limited', message: `仅允许 ${allowedDomain} 域名的邮箱注册` });
       // 计入本次尝试（用于窗口期统计）
       if (regIp) regHit('ip:' + regIp);
       regHit('email:' + email);
@@ -461,7 +489,7 @@ const server = http.createServer(async (req, res) => {
       // 记录注册行为，便于审计日志按“用户/关键词”追溯新账号
       await db.recordAudit(uid, 'create_user', uid, 'email=' + email);
       const token = uuid();
-      await db.createUserToken({ token, userId: uid, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
+      await db.createUserToken({ token, userId: uid, createdAt: nowMs(), expiresAt: nowMs() + globals.get('user_token_ttl_ms') });
       return sendJson(res, 200, { userToken: token, email, role: orgRes.role, isSuper });
     }
     if (req.method === 'POST' && p === '/api/auth/login') {
@@ -479,7 +507,7 @@ const server = http.createServer(async (req, res) => {
         isSuper = true;
       }
       const token = uuid();
-      await db.createUserToken({ token, userId: user.id, createdAt: nowMs(), expiresAt: nowMs() + config.USER_TOKEN_TTL_MS });
+      await db.createUserToken({ token, userId: user.id, createdAt: nowMs(), expiresAt: nowMs() + globals.get('user_token_ttl_ms') });
       return sendJson(res, 200, { userToken: token, email: user.email, realName: user.real_name || '', isSuper });
     }
     if (req.method === 'GET' && p === '/api/auth/me') {
@@ -684,13 +712,17 @@ const server = http.createServer(async (req, res) => {
       const s = body.settings || {};
       const ownerId = idn.userId;
       const am = (s.authMode === 'approve' || s.authMode === 'wechat') ? s.authMode : 'open';
+      // 防盗用默认策略（超管全局参数）：客户端未显式给出时，用全局默认值填充
+      const wmIn = s.watermark || { mode: globals.get('default_watermark_mode'), text: '', dl: globals.get('default_download_watermark') };
+      const extra = Object.assign({}, s.extra || {});
+      if (extra.antiForward === undefined) extra.antiForward = globals.get('default_antiforward');
       await db.createShare({
         shareId, fileId: file.id, ownerId, ownerToken, name: s.name || file.original_name, kind: file.kind,
         maxViewers: Number(s.maxViewers) || 0, maxViews: Number(s.maxViews) || 0, durationSec: Number(s.durationSec) || 0,
         expiresAt: s.expiresAt ? Number(s.expiresAt) : null, accessCode: s.accessCode || null, authMode: am,
-        watermark: s.watermark || '',
+        watermark: normWatermark(wmIn),
         restrictions: { copy: !!s.disableCopy, print: !!s.disablePrint, download: !!s.disableDownload, screenshot: !!s.disableScreenshot },
-        extra: s.extra || null,
+        extra,
         createdAt: nowMs()
       });
       const link = `${(config.BASE_URL || u.origin)}/viewer.html?share=${shareId}`;
@@ -865,14 +897,16 @@ const server = http.createServer(async (req, res) => {
       try { quickSettings = JSON.parse(await readBody(req, 1 << 16)); } catch (e) {}
       const qs = quickSettings || {};
       const am = (qs.authMode === 'approve' || qs.authMode === 'wechat') ? qs.authMode : 'open';
-      const extra = qs.extra || null;
+      const wmIn = qs.watermark || { mode: globals.get('default_watermark_mode'), text: '', dl: globals.get('default_download_watermark') };
+      const extra = Object.assign({}, qs.extra || {});
+      if (extra.antiForward === undefined) extra.antiForward = globals.get('default_antiforward');
       const shareId = uuid().slice(0, 12);
       const ownerToken = uuid();
       await db.createShare({
         shareId, fileId: f.id, ownerId: idn.userId, ownerToken, name: qs.name || f.original_name, kind: f.kind,
         maxViewers: Number(qs.maxViewers) || 0, maxViews: Number(qs.maxViews) || 0, durationSec: Number(qs.durationSec) || 0,
         expiresAt: qs.expiresAt ? Number(qs.expiresAt) : null, accessCode: qs.accessCode || null, authMode: am,
-        watermark: qs.watermark || '',
+        watermark: normWatermark(wmIn),
         restrictions: {
           copy: !!qs.disableCopy, print: !!qs.disablePrint,
           download: !!qs.disableDownload, screenshot: !!qs.disableScreenshot
@@ -955,7 +989,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         shareId: share.id, name: share.name, kind: share.kind, status: share.status,
         preview: !!share.preview_path,
-        requiresCode, authMode: share.auth_mode, watermark: share.watermark,
+        requiresCode, authMode: share.auth_mode, watermark: parseWatermark(share.watermark),
         restrictions: {
           copy: !!share.disable_copy, print: !!share.disable_print,
           download: !!share.disable_download, screenshot: !!share.disable_screenshot
@@ -1003,6 +1037,13 @@ const server = http.createServer(async (req, res) => {
       if (share.access_code && body.code !== share.access_code)
         return sendJson(res, 200, { needCode: true, message: '需要访问码' });
 
+      // 链接防转发：绑定首次成功打开的设备，阻止把链接转发给他人使用。
+      // 保守设计：仅当分享开启「链接防转发」且已绑定到别的设备时才拦截，避免误伤正常多设备查看。
+      let afExtra = {};
+      try { afExtra = share.extra ? JSON.parse(share.extra) : {}; } catch (e) { afExtra = {}; }
+      if (afExtra.antiForward && afExtra.boundViewer && afExtra.boundViewer !== viewerToken)
+        return sendJson(res, 403, { error: 'link_bound', message: '该链接已绑定首次打开的设备，无法转发给他人使用。如需多人查看，请关闭「链接防转发」或重新生成链接。' });
+
       if (share.auth_mode === 'approve' || share.auth_mode === 'wechat') {
         const ap = await db.getApproval(shareId, viewerToken);
         if (!ap || ap.status !== 'approved') {
@@ -1012,7 +1053,13 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, { needApproval: true, message: '已发送访问申请，等待分享者授权' });
         }
       }
-      return sendJson(res, 200, await grantAccess(req, share, viewerToken));
+      const grant = await grantAccess(req, share, viewerToken);
+      // 首次成功打开后落定绑定（仅当开启「链接防转发」且尚无绑定记录）
+      if (afExtra.antiForward && !afExtra.boundViewer) {
+        afExtra.boundViewer = viewerToken;
+        try { await db.run('UPDATE shares SET extra=? WHERE id=?', [JSON.stringify(afExtra), shareId]); } catch (e) {}
+      }
+      return sendJson(res, 200, grant);
     }
 
     // 内容下发（需有效会话）
@@ -1032,8 +1079,31 @@ const server = http.createServer(async (req, res) => {
       const raw = u.searchParams.get('raw') === '1';
       if (file.kind === 'docx' && !raw) {
         const html = await renderDocx(file);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...frameGuardHeaders() });
         return res.end(html);
+      }
+      // 下载带水印：raw=1 且分享开启了「下载带水印」且为图片 / PDF 时，
+      // 返回后端生成的带水印副本（访客ID + 时间落定，便于溯源）；其余情况走原文件下发。
+      // 水印生成失败则静默回退为原文件，绝不阻断下载。
+      const wm = parseWatermark(share.watermark);
+      if (raw && wm && wm.dl && (file.kind === 'pdf' || file.kind === 'image')) {
+        try {
+          const src = await storage.readBuffer(file.stored_name);
+          const vt = sess && sess.viewer_token ? sess.viewer_token.slice(0, 8) : '';
+          const ts = new Date().toLocaleString('zh-CN', { hour12: false });
+          const wmOut = await watermarkFile(src, file.kind, file.mime, wm, { viewerId: vt, time: ts });
+          if (wmOut && wmOut.buf) {
+            const base = (file.original_name || 'download').replace(/\.[^.]+$/, '');
+            const fn = encodeURIComponent(base + '_watermarked.' + (wmOut.ext || 'bin'));
+            res.writeHead(200, {
+              'Content-Type': wmOut.mime,
+              'Content-Disposition': `attachment; filename="${fn}"; filename*=UTF-8''${fn}`,
+              'Content-Length': wmOut.buf.length,
+              'Cache-Control': 'no-store'
+            });
+            return res.end(wmOut.buf);
+          }
+        } catch (e) { /* 回退原文件 */ }
       }
       const ct = file.kind === 'pdf' ? 'application/pdf' : (file.mime || 'application/octet-stream');
       // ── COS 直连模式 ──────────────────────────────────────────────
@@ -1153,7 +1223,7 @@ const server = http.createServer(async (req, res) => {
         shareId: s.id, fileId: s.file_id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers,
         maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
-        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
+        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
         createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
       }));
@@ -1285,7 +1355,7 @@ const server = http.createServer(async (req, res) => {
         shareId: s.id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers, ownerEmail: s.owner_email || '(匿名)',
         maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
-        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
+        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
         createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
       }));
@@ -1333,7 +1403,7 @@ const server = http.createServer(async (req, res) => {
         ownerEmail: s.owner_email || '(匿名)',
         opens: s.opens, viewers: s.viewers,
         maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
-        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: s.watermark,
+        expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
         createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
       }));
@@ -1390,6 +1460,38 @@ const server = http.createServer(async (req, res) => {
       }
       await db.recordAudit(sup.id, 'cleanup', 'storage', `files=${deleted};bytes=${freed}`);
       return sendJson(res, 200, { ok: true, deleted, freed });
+    }
+    // 全局参数：读取注册表 + 当前生效值 + 来源（超管可见）
+    if (req.method === 'GET' && p === '/api/super/settings') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      return sendJson(res, 200, await globals.listForApi());
+    }
+    // 全局参数：保存（支持单条 {key,value} 或批量 {settings:{...}}）
+    if (req.method === 'PUT' && p === '/api/super/settings') {
+      const sup = await requireSuper(u.searchParams.get('userToken'));
+      if (!sup) return sendJson(res, 403, { error: 'no_super' });
+      let b;
+      try { b = JSON.parse(await readBody(req, 1 << 20)); } catch (e) { return sendJson(res, 400, { error: 'bad_json' }); }
+      try {
+        const updated = [];
+        if (b.key !== undefined) {
+          const r = await globals.setOne(b.key, b.value);
+          updated.push(r);
+        } else if (b.settings && typeof b.settings === 'object') {
+          for (const [k, v] of Object.entries(b.settings)) { updated.push(await globals.setOne(k, v)); }
+        } else {
+          return sendJson(res, 400, { error: 'empty', message: '请提供 key/value 或 settings 对象' });
+        }
+        await db.recordAudit(sup.id, 'set_global', 'global', `keys=${updated.map(x => x.key).join(',')}`);
+        return sendJson(res, 200, { ok: true, updated });
+      } catch (e) {
+        return sendJson(res, e.status || 400, { error: e.code || 'set_failed', message: e.message });
+      }
+    }
+    // 公开的全局默认（防盗用默认策略），供创建分享表单拉取初始值
+    if (req.method === 'GET' && p === '/api/globals/public') {
+      return sendJson(res, 200, globals.publicDefaults());
     }
     // 用户管理动作：disable / enable / role / super / delete
     const um = p.match(/^\/api\/super\/user\/([^/]+)\/(disable|enable|role|super|delete)$/);
@@ -1549,6 +1651,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 db.init()
+  .then(() => globals.loadEffective())
   .then(() => {
     server.listen(PORT, () => {
       console.log(`安阅服务已启动: http://localhost:${PORT}（数据库：${db.driverType()}）`);

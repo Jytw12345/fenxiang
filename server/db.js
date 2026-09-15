@@ -245,11 +245,21 @@ async function getShareMeta(id) {
 async function setShareStatus(shareId, status, now) {
   await drv.run('UPDATE shares SET status=?, updated_at=? WHERE id=?', [status, now, shareId]);
 }
+// 水印字段兼容层：入参 watermark 可能是对象 {mode,text,dl}（新模型）或纯字符串（旧模型，按静态处理）。
+// 统一落成 JSON 字符串存入 watermark 列；none/空则存空串。
+function normWatermark(w) {
+  if (!w) return '';
+  if (typeof w !== 'object') {
+    return w.length ? JSON.stringify({ mode: 'static', text: w, dl: false }) : '';
+  }
+  if (!w.mode || w.mode === 'none') return '';
+  return JSON.stringify({ mode: w.mode, text: w.text || '', dl: !!w.dl });
+}
 async function updateShareSettings(shareId, s, now) {
   const am = (s.authMode === 'approve' || s.authMode === 'wechat') ? s.authMode : 'open';
   const extraStr = s.extra ? (typeof s.extra === 'string' ? s.extra : JSON.stringify(s.extra)) : '';
   await drv.run(`UPDATE shares SET max_viewers=?,max_views=?,duration_sec=?,expires_at=?,access_code=?,auth_mode=?,watermark=?,disable_copy=?,disable_print=?,disable_download=?,disable_screenshot=?,extra=?,updated_at=? WHERE id=?`,
-    [Number(s.maxViewers) || 0, Number(s.maxViews) || 0, Number(s.durationSec) || 0, s.expiresAt ? Number(s.expiresAt) : null, s.accessCode || null, am, s.watermark || '', s.disableCopy ? 1 : 0, s.disablePrint ? 1 : 0, s.disableDownload ? 1 : 0, s.disableScreenshot ? 1 : 0, extraStr, now, shareId]);
+    [Number(s.maxViewers) || 0, Number(s.maxViews) || 0, Number(s.durationSec) || 0, s.expiresAt ? Number(s.expiresAt) : null, s.accessCode || null, am, normWatermark(s.watermark), s.disableCopy ? 1 : 0, s.disablePrint ? 1 : 0, s.disableDownload ? 1 : 0, s.disableScreenshot ? 1 : 0, extraStr, now, shareId]);
 }
 
 // ---------- 访问统计与审批 ----------
@@ -461,6 +471,24 @@ async function dashboardRecentViewers(ownerId, isSuper) {
     ${where} GROUP BY l.viewer_token ORDER BY last_at DESC LIMIT 20`, params);
 }
 
+// ---------- 全局参数（超管后台可改，DB 落库覆盖环境变量） ----------
+// value 一律以 JSON 字符串存储，外部按类型解析。方言无关：先查后插/更。
+async function getGlobalSetting(key) {
+  const row = await drv.get('SELECT value FROM global_settings WHERE key=?', [key]);
+  return row ? row.value : null;
+}
+async function getGlobalSettings() {
+  const rows = await drv.all('SELECT key, value FROM global_settings');
+  const out = {};
+  for (const r of (rows || [])) out[r.key] = r.value;
+  return out;
+}
+async function setGlobalSetting(key, value, updatedAt) {
+  const existing = await drv.get('SELECT key FROM global_settings WHERE key=?', [key]);
+  if (existing) await drv.run('UPDATE global_settings SET value=?, updated_at=? WHERE key=?', [value, updatedAt, key]);
+  else await drv.run('INSERT INTO global_settings (key, value, updated_at) VALUES (?,?,?)', [key, value, updatedAt]);
+}
+
 module.exports = {
   init, end, isReady, driverType, uuid,
   // users/tokens
@@ -485,6 +513,8 @@ module.exports = {
   updateUserPassword, updateUserProfile, revokeOtherTokens,
   getUserByEmail, deleteUser, statsStorage, orphanFiles, deleteFileRow, deleteShareRow, recordAudit, listAudit,
   dashboardTotals, dashboardTopShares, dashboardRecentViewers,
+  // 全局参数
+  getGlobalSetting, getGlobalSettings, setGlobalSetting,
   // 直接透传底层（极少数方言无关操作）
   get: (sql, params) => drv.get(sql, params),
   all: (sql, params) => drv.all(sql, params),

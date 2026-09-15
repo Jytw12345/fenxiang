@@ -1,19 +1,22 @@
 {
   "name": "safe-share",
   "version": "0.1.0",
-  "description": "安全分享软件 - 内容保护、受限预览、访问追踪、远程销毁（对标笔熊分享 pdfjm.com）",
+  "description": "安全分享软件 - 内容保护、受限预览、访问追踪、远程销毁",
   "type": "commonjs",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js"
   },
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "cos-nodejs-sdk-v5": "^2.11.0",
     "mammoth": "^1.8.0",
+    "pdf-lib": "^1.17.1",
+    "pureimage": "^0.4.20",
     "qrcode": "^1.5.4"
   },
   "optionalDependencies": {
-    "pg": "^8.11.0",
-    "mysql2": "^3.6.0"
+    "mysql2": "^3.6.0",
+    "pg": "^8.11.0"
   }
 }

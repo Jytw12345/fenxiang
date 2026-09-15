@@ -28,7 +28,8 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS orgs (id TEXT PRIMARY KEY, name TEXT, domain TEXT, created_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS org_invites (code TEXT PRIMARY KEY, org_id TEXT, created_by TEXT, created_at INTEGER)`,
     `CREATE INDEX IF NOT EXISTS idx_invites_org ON org_invites(org_id)`,
-    `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at INTEGER)`
+    `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at INTEGER)`,
+    `CREATE TABLE IF NOT EXISTS global_settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)`
   ],
   postgres: [
     `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at BIGINT, org_id TEXT DEFAULT '', role TEXT DEFAULT 'member', supabase_id TEXT DEFAULT '', is_super INTEGER DEFAULT 0, disabled INTEGER DEFAULT 0, real_name TEXT DEFAULT '', prefs TEXT DEFAULT '')`,
@@ -44,7 +45,8 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS orgs (id TEXT PRIMARY KEY, name TEXT, domain TEXT, created_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS org_invites (code TEXT PRIMARY KEY, org_id TEXT, created_by TEXT, created_at BIGINT)`,
     `CREATE INDEX IF NOT EXISTS idx_invites_org ON org_invites(org_id)`,
-    `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at BIGINT)`
+    `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at BIGINT)`,
+    `CREATE TABLE IF NOT EXISTS global_settings (key TEXT PRIMARY KEY, value TEXT, updated_at BIGINT)`
   ],
   mysql: [
     `CREATE TABLE IF NOT EXISTS users (id VARCHAR(64) PRIMARY KEY, email VARCHAR(255) UNIQUE, password_hash TEXT, salt TEXT, wechat_openid TEXT, created_at BIGINT, org_id VARCHAR(64) DEFAULT '', role VARCHAR(16) DEFAULT 'member', supabase_id VARCHAR(64) DEFAULT '', is_super INT DEFAULT 0, disabled INT DEFAULT 0, real_name TEXT DEFAULT '', prefs TEXT DEFAULT '')`,
@@ -60,7 +62,8 @@ const SCHEMA = {
     `CREATE TABLE IF NOT EXISTS orgs (id VARCHAR(64) PRIMARY KEY, name TEXT, domain VARCHAR(255), created_at BIGINT)`,
     `CREATE TABLE IF NOT EXISTS org_invites (code VARCHAR(32) PRIMARY KEY, org_id VARCHAR(64), created_by VARCHAR(64), created_at BIGINT)`,
     `CREATE INDEX IF NOT EXISTS idx_invites_org ON org_invites(org_id)`,
-    `CREATE TABLE IF NOT EXISTS audit_logs (id VARCHAR(64) PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at BIGINT)`
+    `CREATE TABLE IF NOT EXISTS audit_logs (id VARCHAR(64) PRIMARY KEY, actor_id TEXT, action TEXT, target TEXT, detail TEXT, created_at BIGINT)`,
+    `CREATE TABLE IF NOT EXISTS global_settings (key VARCHAR(64) PRIMARY KEY, value TEXT, updated_at BIGINT)`
   ]
 };
 
@@ -83,9 +86,15 @@ function sqliteDriver() {
 }
 
 async function pgDriver() {
-  let Pool;
-  try { ({ Pool } = require('pg')); }
+  let pg;
+  try { pg = require('pg'); }
   catch (e) { throw new Error('DB_TYPE=postgres 需要 pg 驱动，请在 Docker 构建中安装（optionalDependencies 已包含）：' + e.message); }
+  // 统一 BIGINT(INT8, OID=20) 的返回类型为 Number：
+  // node-postgres 默认把 INT8 解析成「字符串」，前端 new Date("1757...") 会得到 Invalid Date
+  // （本地 sqlite/mysql 返回数字，故该问题只在 postgres/Supabase 环境暴露）。
+  // 本项目 BIGINT 只用于毫秒时间戳与文件字节数，均远小于 2^53，转 Number 无精度风险。
+  try { pg.types.setTypeParser(20, v => (v == null ? v : Number(v))); } catch (e) {}
+  const { Pool } = pg;
   const pool = new Pool(config.DB.config);
   return {
     type: 'postgres',
