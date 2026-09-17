@@ -676,6 +676,9 @@ function pdfSetDisplay(v) {
   pdfApplyWidths();
   setZpct(PDFV.display);
   pdfEnsureCrisp();
+  // 内容超宽时鼠标悬停显示 grab 光标，提示可按住拖移
+  const st = $('#pdfStage');
+  if (st) st.classList.toggle('grab', st.scrollWidth > st.clientWidth + 1);
 }
 // 适应宽度：单页=一页宽铺满容器；双页/书籍=两页并排铺满。手机竖屏下比 100% 更实用。
 function pdfFitWidth() {
@@ -715,6 +718,27 @@ function initPdfReader() {
       }
     }, { passive: false });
     stage.addEventListener('touchend', () => { pinch = 0; });
+    // 桌面：grab 拖拽平移。放大后内容超出可视区时，按住直接拖画面（横向滚 stage、纵向滚页面），
+    // 不必找底部滚动条；未放大（内容没超宽）时不接管，保持普通光标。
+    let pd = null;   // { x, y, sl }
+    stage.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (stage.scrollWidth <= stage.clientWidth + 1) return;   // 没超宽，无需拖移
+      pd = { x: e.clientX, y: e.clientY, sl: stage.scrollLeft };
+      stage.classList.add('grabbing');
+      e.preventDefault();                                        // 防止拖成文本选择（PDF 无文本层，安全）
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!pd) return;
+      stage.scrollLeft = pd.sl - (e.clientX - pd.x);
+      window.scrollBy(0, -(e.clientY - pd.y));
+      pd.y = e.clientY;                                          // 纵向增量累积（scrollBy 后以新位置为基准）
+    });
+    window.addEventListener('mouseup', () => {
+      if (!pd) return;
+      pd = null;
+      stage.classList.remove('grabbing');
+    });
   }
   ensureZbar();
 }

@@ -29,9 +29,12 @@
   /* 下载按钮与 badge 同档：高 28px，与胶囊 hint 垂直居中并排 */
   #dlTop{height:28px;padding:0 12px;font-size:12.5px;line-height:1;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
 
-  /* 缩放查看器 */
-  #pdfStage{overflow-x:auto;width:100%;touch-action:pan-y;-webkit-overflow-scrolling:touch;}
+  /* 缩放查看器。touch-action 含 pan-x：手机放大后单指可横向拖移画面（stage 原生 overflow-x 滚动），
+     纵向仍走页面滚动；双指捏合不含在 pan 内，仍由 JS touchmove 处理缩放 */
+  #pdfStage{overflow-x:auto;width:100%;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch;}
   #pages.zoomed canvas{max-width:none;}
+  #pdfStage.grab{cursor:grab;}
+  #pdfStage.grabbing{cursor:grabbing;}
   #imgStage{position:relative;overflow:hidden;touch-action:none;width:100%;min-height:62vh;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.08);}
   #imgStage .zcontent{transform-origin:0 0;will-change:transform;}
   #imgStage img{max-width:none;}
