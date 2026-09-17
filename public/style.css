@@ -164,7 +164,10 @@ input::placeholder,textarea::placeholder{color:#9aa2b8;}
 .chips label:hover{border-color:#cdd6f5;}
 .chips label:has(input:checked){border-color:var(--brand);background:#eef1ff;color:var(--brand);font-weight:600;}
 .chips input{width:auto;accent-color:var(--brand);}
-.chips.wm-types{grid-template-columns:repeat(3,1fr);}
+.chips.wm-types{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
+/* 水印类型胶囊：隐藏原生 radio 圆点，纯文字胶囊 + 选中高亮（:has(input:checked) 仍生效） */
+.chips.wm-types label{position:relative;overflow:hidden;}
+.chips.wm-types input{position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;}
 .wm-widget{display:flex;flex-direction:column;gap:8px;}
 .wm-hint{display:block;color:var(--muted);font-size:10.5px;margin-top:3px;line-height:1.45;}
 .frow-wm{align-items:flex-start;}
@@ -584,6 +587,11 @@ select.inp{padding-right:4px;}
 .edit-grid .egrid-2{grid-column:span 2;}
 /* 日期框需要更宽（原生控件约 154px），窄屏占两列以保证不被日历图标压字 */
 .edit-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+/* 窄屏（手机/小窗）：弹窗三列网格退化为两列，避免字段挤到看不清 */
+@media (max-width:560px){
+  .edit-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .edit-grid .egrid-2{grid-column:span 2;}
+}
 /* 分组标题：文字 + 提示 + 一条延伸到右侧的分割线（右侧可再接一个开关） */
 .esec{display:flex;align-items:center;gap:8px;font-size:11.5px;font-weight:700;color:#374151;margin:11px 0 6px;white-space:nowrap;}
 .esec::after{content:'';flex:1 1 auto;min-width:6px;height:1px;background:var(--line);}

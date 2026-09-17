@@ -1219,14 +1219,20 @@ const server = http.createServer(async (req, res) => {
       const idn = await resolveIdentity(token);
       if (!idn || idn.type !== 'user') return sendJson(res, 403, { error: 'no_auth', message: '请先登录' });
       const shares = await db.listMySharesById(idn.userId);
-      const list = shares.map(s => ({
+      const list = shares.map(s => {
+        let extraObj = {};
+        try { extraObj = s.extra ? JSON.parse(s.extra) : {}; } catch (e) { extraObj = {}; }
+        return {
         shareId: s.id, fileId: s.file_id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers,
         maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
         expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
+        // extra（试看页数/保护密码/链接防转发）必须回传，否则改权限弹窗回填不到、保存会静默清掉这些设置
+        extra: extraObj,
         createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
-      }));
+        };
+      });
       return sendJson(res, 200, { shares: list });
     }
 

@@ -140,15 +140,19 @@
     localStorage.setItem('userToken', token);
     localStorage.setItem('userEmail', email || '');
     close();
-    // 回写 admin.js 的闭包 token，并刷新「我的分享」列表（否则晚于页面解析的登录会让 token 陈旧、改权限弹不出）
+    // 回写 admin.js 的闭包 token，让刷新前的界面（右上角/导航）先切到登录态
     if (typeof window.__setAdminToken === 'function') window.__setAdminToken(token);
-    if (typeof window.__reloadShares === 'function') window.__reloadShares();
     if (typeof window.afterLogin === 'function') window.afterLogin(email);
     if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: true, isSuper: !!isSuper, email: email });
     if (!silent) {
       const t = document.getElementById('toast');
-      if (t) { t.textContent = '登录成功'; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); }
+      if (t) { t.textContent = '登录成功'; t.classList.add('show'); }
     }
+    // 登录成功后整页刷新一次：后台各面板（我的分享/全店分享/文件管理/数据概览…）都是按
+    // 「页面解析时的登录态」决定是否拉数据的，晚于页面加载的登录不会自动重拉，用户会看到空列表。
+    // 统一刷新一次最可靠；刷新后已有 token，不会再触发登录，无循环风险。
+    // 静默登录（记住密码自动恢复）不留看 toast，立即刷；手动登录留 650ms 让用户看到「登录成功」。
+    setTimeout(() => location.reload(), silent ? 50 : 650);
   }
 
   // 侧栏导航显隐：nav-auth 仅登录可见；nav-super 仅超管可见。

@@ -17,14 +17,17 @@
   .gate .card { text-align: left; }
   .lock { font-size: 40px; text-align: center; margin-bottom: 8px; }
   #imgWrap img { max-width: 100%; box-shadow: 0 2px 10px rgba(0,0,0,.12); }
-  .badge { font-size: 12px; color: var(--muted); }
+  .badge { font-size: 12px; color: var(--muted); display:inline-flex; align-items:center; gap:6px; }
   .dl { text-align:center; padding: 40px; }
   .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px;}
-  .vhint{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);background:#f3f5f9;border:1px solid var(--line);border-radius:999px;padding:3px 9px;margin:2px;white-space:nowrap;}
-  .vhint .vhi{font-size:13px;line-height:1;}
-  #docName{font-weight:800;font-size:15px;color:var(--ink);word-break:break-all;}
-  .tb-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;}
-  #dlTop{padding:7px 16px;font-size:13px;white-space:nowrap;}
+  .vhint{display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--muted);background:#f3f5f9;border:1px solid var(--line);border-radius:999px;padding:2px 8px;margin:0;white-space:nowrap;}
+  .vhint .vhi{font-size:12px;line-height:1;}
+  /* 标题单行省略：长文件名不再换行撑高顶栏，超出打省略号；
+     覆盖 .brand 自带的 LOGO 大 padding（4/10/20），顶栏压回一行高 */
+  #docName{font-weight:700;font-size:14px;line-height:1.25;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;padding:2px 0;}
+  .tb-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;flex:0 0 auto;}
+  /* 下载按钮与 badge 同档：高 28px，与胶囊 hint 垂直居中并排 */
+  #dlTop{height:28px;padding:0 12px;font-size:12.5px;line-height:1;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
 
   /* 缩放查看器 */
   #pdfStage{overflow-x:auto;width:100%;touch-action:pan-y;-webkit-overflow-scrolling:touch;}

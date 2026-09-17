@@ -506,15 +506,31 @@ function applySettingsLocal(x, s) {
 let editId = null;
 window.editShare = async (id) => {
   editId = id;
+  // 优先用本地缓存（shareById）秒开：列表刚拉过，数据足够新，保存时后端还会做权限校验。
+  // 之前每次实时 fetch 全量列表，网络一慢就是"点半天弹不出来"。
+  const cached = shareById.get(id) && shareById.get(id).s;
+  if (cached) { renderEditModal(cached); return; }
+  // 无缓存才走网络：先立即开壳给出反馈，数据到了再填充
+  $('#editBody').innerHTML = '<p class="sub" style="text-align:center;padding:34px 0">正在加载权限设置…</p>';
+  $('#editModal').classList.add('show');
   // token 实时读取（闭包 token 可能因晚登录而陈旧），失败也能优雅提示而非抛错中断弹窗
   const tk = token || localStorage.getItem('userToken');
-  if (!tk) { alertDialog('登录状态已失效，请重新登录后重试'); return; }
-  const r = await fetch(`/api/admin/${tk}`);
-  if (!r.ok) { alertDialog('加载分享信息失败（' + r.status + '），请刷新后重试'); return; }
-  const d = await r.json();
-  const shares = Array.isArray(d.shares) ? d.shares : [];
-  const s = shares.find(x => x.shareId === id);
-  if (!s) { alertDialog('未找到该分享，请刷新页面后重试'); return; }
+  if (!tk) { $('#editModal').classList.remove('show'); alertDialog('登录状态已失效，请重新登录后重试'); return; }
+  try {
+    const r = await fetch(`/api/admin/${tk}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const shares = Array.isArray(d.shares) ? d.shares : [];
+    const s = shares.find(x => x.shareId === id);
+    if (!s) throw new Error('未找到该分享');
+    renderEditModal(s);
+  } catch (e) {
+    $('#editModal').classList.remove('show');
+    alertDialog('加载分享信息失败（' + (e.message || '网络异常') + '），请刷新后重试');
+  }
+};
+
+function renderEditModal(s) {
   const extra = s.extra || {};
   const pp = Number(extra.previewPages) || 0;
   const pEnabled = pp > 0;
@@ -561,7 +577,7 @@ window.editShare = async (id) => {
         <div class="ef-hd"><label>单次时长</label><i>分钟，0 = 不限</i></div>
         <input id="eDur" type="number" value="${Math.round(s.durationSec/60)}">
       </div>
-      <div class="efield egrid-2">
+      <div class="efield egrid-full">
         <div class="ef-hd"><label>水印</label><i>预览与下载留痕</i></div>
         ${watermarkWidgetHtml('eWm')}
       </div>
@@ -625,16 +641,27 @@ $('#saveEdit').onclick = async () => {
     expiresAt,
     extra
   };
-  await fetch(`/api/admin/${token}/share/${editId}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  $('#editModal').classList.remove('show'); toast('权限已更新');
-  // 乐观更新：把新权限写回本地缓存并重渲染，不重新拉取整表
-  mineShares = mineShares.map(s => s.shareId === editId ? {
-    ...s, maxViewers: body.maxViewers, maxViews: body.maxViews, durationSec: body.durationSec,
-    accessCode: body.accessCode, authMode: body.authMode, watermark: body.watermark, expiresAt: body.expiresAt,
-    restrictions: { copy: body.disableCopy, print: body.disablePrint, download: body.disableDownload, screenshot: body.disableScreenshot },
-    extra: body.extra
-  } : s);
-  renderMineGrid();
+  const tk = token || localStorage.getItem('userToken');
+  const btn = $('#saveEdit');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    const r = await fetch(`/api/admin/${tk}/share/${editId}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    $('#editModal').classList.remove('show'); toast('权限已更新');
+    // 乐观更新：把新权限写回本地缓存并重渲染，不重新拉取整表
+    mineShares = mineShares.map(s => s.shareId === editId ? {
+      ...s, maxViewers: body.maxViewers, maxViews: body.maxViews, durationSec: body.durationSec,
+      accessCode: body.accessCode, authMode: body.authMode, watermark: body.watermark, expiresAt: body.expiresAt,
+      restrictions: { copy: body.disableCopy, print: body.disablePrint, download: body.disableDownload, screenshot: body.disableScreenshot },
+      extra: body.extra
+    } : s);
+    renderMineGrid();
+  } catch (e) {
+    // 失败不关窗：保留用户已填内容，明确报错可重试
+    toast('保存失败（' + (e.message || '网络异常') + '），请重试');
+  } finally {
+    btn.disabled = false; btn.textContent = '保存';
+  }
 };
 
 window.showApprovals = async (id) => {
