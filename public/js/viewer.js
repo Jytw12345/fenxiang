@@ -672,8 +672,8 @@ function pdfEnsureCrisp() {
   }, ZOOM_CFG.pdfCrispDebounce);
 }
 function pdfSetDisplay(v) {
-  // 下限用动态 pdfMinDisp：超大文档适宽可能低于 0.5，硬下限会让"适宽后一缩小反而变大"
-  PDFV.display = Math.min(MAX_DISP, Math.max(PDFV.minDisp || MIN_DISP, v));
+  // 上下限都用动态值：超大文档适宽可能远低于 0.5，硬上下限会让"适宽后一缩小反而变大 / 放大没尽头"
+  PDFV.display = Math.min(PDFV.maxDisp || MAX_DISP, Math.max(PDFV.minDisp || MIN_DISP, v));
   $('#pages').classList.add('zoomed');
   pdfApplyWidths();
   setZpct(PDFV.display);
@@ -693,8 +693,10 @@ function pdfFitWidth() {
   if (!maxW) return;
   const target = (avail - (cols > 1 ? 12 : 0)) / cols;
   const disp = target / maxW;
-  // 适宽结果低于默认下限时，放宽缩放下限到适宽值，保证"-"仍能继续缩小而不是跳回 50%
-  PDFV.minDisp = Math.min(MIN_DISP, disp);
+  // 缩放范围跟随适宽结果：下限=适宽一半，上限=适宽×8（不低于 1×，不超过全局 4×），
+  // 避免"适宽 8% 后还能一路放大到 400%"这种没有尽头的跨度
+  PDFV.minDisp = Math.min(MIN_DISP, disp * 0.5);
+  PDFV.maxDisp = Math.min(MAX_DISP, Math.max(1, disp * 8));
   pdfSetDisplay(disp);
 }
 function initPdfReader() {
@@ -1264,10 +1266,10 @@ function presentExit() {
 
 // ---- 图片：transform 缩放 + 拖移 + 捏合，基于原图像素故放大不损画质 ----
 function imgApply() { if (imgContent) { imgContent.style.transform = `translate(${imgX}px,${imgY}px) scale(${imgScale})`; setZpct(imgScale); } }
-// 图片动态缩放下限：适宽/适应窗口算出的比例可能远低于 0.5（超大印刷图），
-// 硬下限 0.5 会让"适宽后一缩小反而跳回 50% 放大"。初始与 PDF 路径仍用 0.5。
-let imgMinScale = ZOOM_CFG.min;
-function imgSetScale(v) { imgScale = Math.min(MAX_DISP, Math.max(imgMinScale, v)); imgClamp(); imgApply(); }
+// 图片动态缩放范围：适宽/适应窗口算出的比例可能远低于 0.5（超大印刷图），
+// 固定 [0.5, 4] 会让缩放跨度没有尽头。适宽后：下限=适宽×0.5，上限=适宽×8（不低于 1×，不超全局 4×）。
+let imgMinScale = ZOOM_CFG.min, imgMaxScale = ZOOM_CFG.max;
+function imgSetScale(v) { imgScale = Math.min(imgMaxScale, Math.max(imgMinScale, v)); imgClamp(); imgApply(); }
 function imgFit() {
   if (!imgStage || !imgContent) return;
   const sw = imgStage.clientWidth, sh = imgStage.clientHeight;
@@ -1278,8 +1280,9 @@ function imgFit() {
   // 适应窗口：宽高都装下（只缩小不放大于原尺寸）；位置统一交给 imgClamp 居中/夹边，
   // 避免 fit 手算偏移在异常布局下把图片平移出视口（超大图"打开看不到"的根因）
   imgScale = Math.min(sw / nw, sh / nh, 1);
-  // 缩放下限跟随适宽结果，并留一半余量（"-"还能继续缩小，但不会跳回 50%）
+  // 缩放范围跟随适宽结果（下限留一半余量；上限到 1× 原图像素即够看细节）
   imgMinScale = Math.min(ZOOM_CFG.min, imgScale * 0.5);
+  imgMaxScale = Math.min(ZOOM_CFG.max, Math.max(1, imgScale * 8));
   imgX = 0; imgY = 0;
   imgClamp(); imgApply();
 }
@@ -1317,7 +1320,7 @@ function enableImageZoom(imgEl) {
     e.preventDefault();
     const rect = imgStage.getBoundingClientRect();
     const ox = e.clientX - rect.left, oy = e.clientY - rect.top;
-    const ns = Math.min(MAX_DISP, Math.max(imgMinScale, imgScale * (e.deltaY < 0 ? ZOOM_CFG.wheelImg : 1 / ZOOM_CFG.wheelImg)));
+    const ns = Math.min(imgMaxScale, Math.max(imgMinScale, imgScale * (e.deltaY < 0 ? ZOOM_CFG.wheelImg : 1 / ZOOM_CFG.wheelImg)));
     imgX = ox - (ox - imgX) * (ns / imgScale);
     imgY = oy - (oy - imgY) * (ns / imgScale);
     imgScale = ns; imgClamp(); imgApply();
@@ -1339,7 +1342,7 @@ function enableImageZoom(imgEl) {
     } else if (e.touches.length === 2) {
       const d = touchDist(e), m = touchMid(e);
       const rect = imgStage.getBoundingClientRect();
-      const ns = Math.min(MAX_DISP, Math.max(imgMinScale, imgScale * (d / (pinchD || d))));
+      const ns = Math.min(imgMaxScale, Math.max(imgMinScale, imgScale * (d / (pinchD || d))));
       const ox = m.x - rect.left, oy = m.y - rect.top;
       imgX = ox - (ox - imgX) * (ns / imgScale);
       imgY = oy - (oy - imgY) * (ns / imgScale);
