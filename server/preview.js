@@ -15,6 +15,7 @@ const config = require('./config');
 const SOURCE_EXTS = ['.psd', '.psb', '.ai', '.cdr', '.eps', '.indd', '.tif', '.tiff', '.svg', '.raw', '.cr2', '.nef', '.arw', '.webp'];
 
 const PREVIEW_TIMEOUT = Number(process.env.PREVIEW_TIMEOUT_MS) || 60000;
+const SLIDE_TIMEOUT = Number(process.env.SLIDE_TIMEOUT_MS) || 180000;   // PPT 转换较慢，放宽到 3 分钟
 
 let _pyPsd = undefined; // 能 import psd_tools 的 python 解释器路径
 let _tools = undefined;  // 外部向量转换工具路径
@@ -138,4 +139,34 @@ async function generatePreview(ext, mime, buf) {
   }
 }
 
-module.exports = { generatePreview, SOURCE_EXTS };
+// PPT → PDF：用 LibreOffice headless 转换，供幻灯片按 PDF 查看器打开（复用缩放/拖移/试看/水印全套能力）
+// 成功返回 { ok:true, buffer, format:'pdf' }；soffice 缺失或失败返回 { ok:false, reason }
+async function generateSlidePdf(ext, buf) {
+  if (config.PREVIEW_ENABLED === false) return { ok: false, reason: 'disabled' };
+  ext = (ext || '').toLowerCase();
+  if (!['.pptx', '.ppt'].includes(ext)) return { ok: false, reason: 'unsupported_ext' };
+  const tools = detectTools();
+  if (!tools.soffice) return { ok: false, reason: 'no_soffice' };   // 前端据此提示"可下载查看"
+
+  const tmp = os.tmpdir();
+  const id = crypto.randomBytes(8).toString('hex');
+  const inPath = path.join(tmp, `slide_in_${id}${ext}`);
+  try {
+    fs.writeFileSync(inPath, buf);
+    // soffice 输出文件名 = 输入文件名换 .pdf（--outdir 控制目录）
+    const code = await run(tools.soffice, ['--headless', '--norestore', '--convert-to', 'pdf', '--outdir', tmp, inPath], SLIDE_TIMEOUT);
+    const outPath = inPath.slice(0, -ext.length) + '.pdf';
+    if (code === 0 && fs.existsSync(outPath)) {
+      const out = fs.readFileSync(outPath);
+      try { fs.unlinkSync(outPath); } catch (e) {}
+      return { ok: true, buffer: out, format: 'pdf' };
+    }
+    return { ok: false, reason: code === -2 ? 'timeout' : 'no_backend_or_failed' };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message) };
+  } finally {
+    try { fs.unlinkSync(inPath); } catch (e) {}
+  }
+}
+
+module.exports = { generatePreview, generateSlidePdf, SOURCE_EXTS };

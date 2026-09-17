@@ -20,16 +20,20 @@ const MAX_UPLOAD = 200 * 1024 * 1024; // 200MB
 // 支持上传的文件格式白名单（与分享内容分类一致）。其余格式在读取文件体之前即拒绝，不上传。
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-const ALLOWED_KINDS = new Set(['pdf', 'image', 'docx', 'source']);
+const SHEET_EXTS = ['.xlsx', '.xls'];                 // Excel：前端 SheetJS 解析预览
+const SLIDE_EXTS = ['.pptx', '.ppt'];                 // PPT：后端 LibreOffice 转 PDF 后按 PDF 查看
+const ALLOWED_KINDS = new Set(['pdf', 'image', 'docx', 'source', 'sheet', 'slide']);
 // 用于前端提示/校验消息的可读扩展名清单
-const SUPPORTED_EXTS = ['.pdf', '.docx', ...IMAGE_EXTS, ...preview.SOURCE_EXTS.filter(e => !IMAGE_EXTS.includes(e))];
-const SUPPORTED_HINT = '仅支持 PDF、Word(.docx)、常见图片(PNG/JPG/JPEG/GIF/WEBP/BMP) 与设计源文件(PSD/PSB/AI/CDR/EPS/INDD/TIF/TIFF/SVG/RAW/CR2/NEF/ARW)';
+const SUPPORTED_EXTS = ['.pdf', '.docx', ...IMAGE_EXTS, ...SHEET_EXTS, ...SLIDE_EXTS, ...preview.SOURCE_EXTS.filter(e => !IMAGE_EXTS.includes(e))];
+const SUPPORTED_HINT = '仅支持 PDF、Word(.docx)、Excel(.xlsx/.xls)、PPT(.pptx/.ppt)、常见图片(PNG/JPG/JPEG/GIF/WEBP/BMP) 与设计源文件(PSD/PSB/AI/CDR/EPS/INDD/TIF/TIFF/SVG/RAW/CR2/NEF/ARW)';
 
 // 根据扩展名 + MIME 判定分享内容类型；未知类型返回 'download'（即不在白名单内）
 function classifyKind(ext, mime) {
   if (mime === 'application/pdf' || ext === '.pdf') return 'pdf';
   if (IMAGE_EXTS.includes(ext) || (mime && mime.startsWith('image/'))) return 'image';
   if (ext === '.docx' || mime === DOCX_MIME) return 'docx';
+  if (SHEET_EXTS.includes(ext)) return 'sheet';
+  if (SLIDE_EXTS.includes(ext)) return 'slide';
   if (preview.SOURCE_EXTS.includes(ext)) return 'source';
   return 'download';
 }
@@ -74,6 +78,38 @@ function enqueuePreview(file) {
       }
     } catch (e) {
       console.warn('[preview] 后台生成预览失败，降级为仅下载：', e && e.message);
+    } finally {
+      previewJobs.delete(file.id);
+    }
+    return null;
+  })();
+  previewJobs.set(file.id, job);
+  return job;
+}
+
+// PPT → PDF 转换任务（与 enqueuePreview 同款去重/信号量）；成功返回缓存名，失败返回 null
+function enqueueSlidePdf(file) {
+  if (!file || file.kind !== 'slide') return Promise.resolve(null);
+  if (previewJobs.has(file.id)) return previewJobs.get(file.id);
+  const job = (async () => {
+    try {
+      await previewAcquire();
+      try {
+        const buf = await storage.readBuffer(file.storedName);
+        const ext = path.extname(file.originalName || file.storedName || '').toLowerCase();
+        const pv = await preview.generateSlidePdf(ext, buf);
+        if (pv.ok) {
+          const pvName = uuid() + '_slide.pdf';
+          await storage.save(pvName, pv.buffer, 'application/pdf');
+          await db.run('UPDATE files SET preview_path=? WHERE id=?', [pvName, file.id]);
+          return pvName;
+        }
+        console.warn('[slide] 转换失败：', pv.reason);
+      } finally {
+        previewRelease();
+      }
+    } catch (e) {
+      console.warn('[slide] 转换异常，降级为仅下载：', e && e.message);
     } finally {
       previewJobs.delete(file.id);
     }
@@ -1200,6 +1236,35 @@ const server = http.createServer(async (req, res) => {
         }
       }
       return sendJson(res, 404, { error: 'no_preview', message: '该文件无可用预览' });
+    }
+
+    // PPT 幻灯片：下发 LibreOffice 转换出的 PDF（需有效会话，与 /api/content 同等鉴权）。
+    // 首次访问按需转换（去重），产物缓存进 preview_path；服务器未装 soffice 时返回明确错误，前端降级为下载提示。
+    if (req.method === 'GET' && p.startsWith('/api/slide/')) {
+      const shareId = p.split('/')[3];
+      const at = u.searchParams.get('at');
+      const sess = await db.getSession(at);
+      if (!sess || Number(sess.expires_at) < nowMs()) return sendJson(res, 403, { error: 'invalid_session' });
+      if (sess.share_id !== shareId) return sendJson(res, 403, { error: 'forbidden', message: '会话与分享不匹配' });
+      const share = await db.getShare(shareId);
+      if (!share || share.status !== 'active') return sendJson(res, 403, { error: 'destroyed' });
+      const file = await db.getFile(share.file_id);
+      if (!file || file.kind !== 'slide') return sendJson(res, 404, { error: 'no_file' });
+      if (!file.preview_path) {
+        try { await enqueueSlidePdf(file); } catch (e) { /* 转换失败走下方降级 */ }
+        const fresh = await db.getFile(share.file_id);
+        if (!fresh.preview_path) {
+          return sendJson(res, 404, { error: 'slide_convert_failed', message: '服务器未安装 PPT 转换组件（LibreOffice），该文件暂只能下载查看' });
+        }
+      }
+      if (storage.cosEnabled) {
+        const signed = await storage.getSignedUrl(file.preview_path, { contentType: 'application/pdf' });
+        res.writeHead(302, { 'Location': signed, 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('Redirecting to COS...');
+      }
+      const data = await storage.readBuffer(file.preview_path);
+      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+      return res.end(data);
     }
 
     // 访问日志上报

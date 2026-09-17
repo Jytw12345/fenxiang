@@ -497,20 +497,21 @@ function renderUnlockBox(limit, total) {
   $('#unlockPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#unlockBtn').click(); });
 }
 
-async function loadContent(k) {
-  if (k === 'pdf') {
+// PDF 渲染管线（pdf 分享与 PPT 转换件共用）：src={url} 流式 / {data:ArrayBuffer} 整体
+async function loadPdfFromUrl(src, failMsg) {
     PDFV.pages = []; PDFV.rot = 0; PDFV.view = 'single'; PDFV.hits = []; PDFV.hitIdx = -1; PDFV.text = null;
     PDFV.vis = new Set(); PDFV.rendered = new Set(); PDFV._est = null;
     $('#pages').innerHTML = '';        // 清掉上一次的页容器（重新加载/切换文件时）
     $('#pages').className = '';        // 清掉 mode-double / mode-book / zoomed 残留
     if (!window.pdfjsLib) { $('#pages').innerHTML = '<p class="sub">PDF 组件加载失败（本地 PDF.js 缺失）</p>'; return; }
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
-    // 用 URL 流式加载：pdf.js 按页 Range 拉取，第一页先出，无需整本下载解析完才显示。
-    // rangeChunkSize 调大至 1MB，减少单页 PDF 的请求次数。
+    // URL 模式用 Range 流式拉取（第一页先出）；data 模式一次性加载（PPT 转换件）。
     try {
-      PDFV.doc = await pdfjsLib.getDocument({ url: '/api/content/' + shareId + '?at=' + accessToken, rangeChunkSize: 1048576 }).promise;
+      PDFV.doc = await pdfjsLib.getDocument(
+        src.url ? { url: src.url, rangeChunkSize: 1048576 } : { data: src.data }
+      ).promise;
     } catch (e) {
-      $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">PDF 加载失败或被拒绝</p>'); return;
+      $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">' + (failMsg || 'PDF 加载失败') + '</p>'); return;
     }
     pdfDoc = PDFV.doc;
     PDFV.total = totalPages = PDFV.doc.numPages;
@@ -540,8 +541,65 @@ async function loadContent(k) {
     obsPages();             // 惰性渲染可见页
     queuePage(1, BASE_SCALE);
     pdfTrackPage();
+}
+
+// PPT：后端 LibreOffice 转 PDF 后按 PDF 查看器打开（缩放/拖移/试看/水印全套复用）。
+// 服务器未装转换组件时后端返回 404+说明，降级为下载提示。
+async function loadSlide() {
+  try {
+    const r = await fetch('/api/slide/' + shareId + '?at=' + accessToken);
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      $('#gate').style.display = 'block'; $('#gateTitle').textContent = '无法在线预览';
+      showGate('<p class="sub">' + escapeHtml(d.message || '该 PPT 暂不支持在线预览') + '</p>');
+      return;
+    }
+    const data = await r.arrayBuffer();
+    await loadPdfFromUrl({ data }, '幻灯片加载失败');
+  } catch (e) {
+    $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">幻灯片加载失败，请稍后重试</p>');
+  }
+}
+
+// Excel：前端 SheetJS 解析，多 Sheet 标签 + HTML 表格（水印层与禁复制约束照常生效）
+async function loadSheet() {
+  try {
+    if (!window.XLSX) throw new Error('表格组件缺失');
+    const r = await fetch('/api/content/' + shareId + '?at=' + accessToken);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.arrayBuffer();
+    const wb = XLSX.read(data, { type: 'array' });
+    const tabs = $('#sheetTabs'), body = $('#sheetBody');
+    tabs.innerHTML = '';
+    const names = wb.SheetNames;
+    const show = (idx) => {
+      tabs.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', i === idx));
+      // sticker:false 去掉内联样式依赖；表格样式统一由 .sheet-body CSS 控制
+      body.innerHTML = XLSX.utils.sheet_to_html(wb.Sheets[names[idx]], { editable: false });
+      body.parentElement.scrollTop = 0;
+    };
+    names.forEach((n, i) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = n;
+      b.addEventListener('click', () => show(i));
+      tabs.appendChild(b);
+    });
+    show(0);
+    $('#sheetWrap').style.display = 'block';
+  } catch (e) {
+    $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">表格加载失败：' + escapeHtml(e.message || '') + '</p>');
+  }
+}
+
+async function loadContent(k) {
+  if (k === 'pdf') {
+    await loadPdfFromUrl({ url: '/api/content/' + shareId + '?at=' + accessToken }, 'PDF 加载失败或被拒绝');
     return;
   }
+
+  if (k === 'slide') { await loadSlide(); return; }
+
+  if (k === 'sheet') { await loadSheet(); return; }
 
   if (k === 'image') {
     // 直接给 <img> 设 URL：浏览器原生支持 Range 与缓存，超大图首屏更快、且可复用服务端字节区间
@@ -1103,7 +1161,7 @@ function initToolbar(k) {
   bar.querySelectorAll('[data-for]').forEach((el) => {
     el.hidden = el.dataset.for.split(',').indexOf(k) < 0;
   });
-  $('#thumbBtn').hidden = (k !== 'pdf');
+  $('#thumbBtn').hidden = (k !== 'pdf' && k !== 'slide');   // PPT 转换件也是 PDF 渲染，有缩略图
   bindToolbar();
 }
 function bindToolbar() {
