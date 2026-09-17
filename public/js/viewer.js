@@ -1327,11 +1327,30 @@ function imgApply() { if (imgContent) { imgContent.style.transform = `translate(
 // 图片动态缩放范围：适宽/适应窗口算出的比例可能远低于 0.5（超大印刷图），
 // 固定 [0.5, 4] 会让缩放跨度没有尽头。适宽后：下限=适宽×0.5，上限=适宽×8（不低于 1×，不超全局 4×）。
 let imgMinScale = ZOOM_CFG.min, imgMaxScale = ZOOM_CFG.max;
-function imgSetScale(v) { imgScale = Math.min(imgMaxScale, Math.max(imgMinScale, v)); imgClamp(); imgApply(); }
+function imgSetScale(v) { imgScale = Math.min(imgMaxScale, Math.max(imgMinScale, v)); sizeStage(); imgClamp(); imgApply(); }
+// stage 的可用区尺寸（父容器内宽 × 62vh）：不依赖 stage 自身当前尺寸（它会被 JS 内联缩小）
+function stageAvail() {
+  const p = imgStage.parentElement, pcs = getComputedStyle(p);
+  return {
+    w: Math.max(200, p.clientWidth - parseFloat(pcs.paddingLeft) - parseFloat(pcs.paddingRight)),
+    h: Math.max(200, Math.round(window.innerHeight * 0.62))
+  };
+}
+// 让 stage 容器紧贴图片的视觉尺寸：竖图/小图不再左右留大白边（transform 不改变布局，
+// 容器无法自动感知缩放后的视觉宽度，只能由 JS 按图片布局尺寸×当前倍率设置）。
+// 图片显示尺寸小于可用区时容器收缩贴合；放大超出可用区时容器顶满（此时才需要拖移）。
+function sizeStage() {
+  if (!imgStage || !imgContent) return;
+  const el = imgContent.querySelector('img'); if (!el || !el.offsetWidth) return;
+  const av = stageAvail();
+  const vw = el.offsetWidth * imgScale, vh = el.offsetHeight * imgScale;
+  imgStage.style.width = Math.max(120, Math.min(av.w, vw)) + 'px';
+  imgStage.style.height = Math.max(120, Math.min(av.h, vh)) + 'px';
+}
 function imgFit() {
   if (!imgStage || !imgContent) return;
-  const sw = imgStage.clientWidth, sh = imgStage.clientHeight;
-  if (!sw || !sh) return;                       // 布局未就绪（隐藏/未插入），等下一次触发
+  const av = stageAvail();
+  const sw = av.w, sh = av.h;
   const imgEl = imgContent.querySelector('img'); if (!imgEl) return;
   const nw = imgEl.naturalWidth || imgEl.width, nh = imgEl.naturalHeight || imgEl.height;
   if (!nw || !nh) return;                       // 图片尺寸未知（未解码完），不猜
@@ -1341,6 +1360,7 @@ function imgFit() {
   // 缩放范围跟随适宽结果（下限留一半余量；上限到 1× 原图像素即够看细节）
   imgMinScale = Math.min(ZOOM_CFG.min, imgScale * 0.5);
   imgMaxScale = Math.min(ZOOM_CFG.max, Math.max(1, imgScale * 8));
+  sizeStage();
   imgX = 0; imgY = 0;
   imgClamp(); imgApply();
 }
@@ -1381,7 +1401,7 @@ function enableImageZoom(imgEl) {
     const ns = Math.min(imgMaxScale, Math.max(imgMinScale, imgScale * (e.deltaY < 0 ? ZOOM_CFG.wheelImg : 1 / ZOOM_CFG.wheelImg)));
     imgX = ox - (ox - imgX) * (ns / imgScale);
     imgY = oy - (oy - imgY) * (ns / imgScale);
-    imgScale = ns; imgClamp(); imgApply();
+    imgScale = ns; sizeStage(); imgClamp(); imgApply();
   }, { passive: false });
   let dragging = false, lx = 0, ly = 0;
   imgStage.addEventListener('mousedown', (e) => { dragging = true; lx = e.clientX; ly = e.clientY; imgStage.style.cursor = 'grabbing'; });
@@ -1404,7 +1424,7 @@ function enableImageZoom(imgEl) {
       const ox = m.x - rect.left, oy = m.y - rect.top;
       imgX = ox - (ox - imgX) * (ns / imgScale);
       imgY = oy - (oy - imgY) * (ns / imgScale);
-      imgScale = ns; pinchD = d; imgClamp(); imgApply();
+      imgScale = ns; pinchD = d; sizeStage(); imgClamp(); imgApply();
     }
   }, { passive: false });
   imgStage.addEventListener('touchend', (e) => {

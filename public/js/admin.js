@@ -1703,7 +1703,7 @@ window.replaceFile = (fileId) => {
     const file = inp.files[0];
     if (!file) return;
     if (detectKind(file) === 'download') {
-      toast('不支持的文件格式，无法替换：仅支持 PDF、Word(.docx)、常见图片与设计源文件(PSD/AI/CDR 等)');
+      toast('不支持的文件格式，无法替换：仅支持 PDF、Word(.docx)、Excel(.xlsx/.xls)、PPT(.pptx/.ppt)、常见图片与设计源文件(PSD/AI/CDR 等)');
       inp.onchange = null; return;
     }
     if (!(await confirmDialog('确定用「' + file.name + '」替换该文件？分享链接保持不变，客户将看到新文件。'))) { inp.onchange = null; return; }
@@ -1798,7 +1798,7 @@ if (fileInput) fileInput.addEventListener('change', () => {
 function setFile(f) {
   // 不支持的格式：选择即拦截，不上传
   if (detectKind(f) === 'download') {
-    toast('不支持的文件格式，仅支持 PDF、Word(.docx)、常见图片(PNG/JPG/GIF/WEBP/BMP) 与设计源文件(PSD/AI/CDR 等)');
+    toast('不支持的文件格式，仅支持 PDF、Word(.docx)、Excel(.xlsx/.xls)、PPT(.pptx/.ppt)、常见图片(PNG/JPG/GIF/WEBP/BMP) 与设计源文件(PSD/AI/CDR 等)');
     selectedFile = null;
     if (fileInput) fileInput.value = '';
     $('#fileinfo').style.display = 'none';
@@ -1824,11 +1824,15 @@ function detectKind(f) {
   if (mime === 'application/pdf' || ext === '.pdf') return 'pdf';
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext) || mime.startsWith('image/')) return 'image';
   if (ext === '.docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+  // 与后端 classifyKind 对齐（server/index.js）：Excel 前端解析预览、PPT 转 PDF 预览
+  if (['.xlsx', '.xls'].includes(ext)) return 'sheet';
+  if (['.pptx', '.ppt'].includes(ext)) return 'slide';
   if (/\.(psd|psb|ai|cdr|eps|indd|tif|tiff|svg|raw|cr2|nef|arw|webp)$/i.test(ext)) return 'source';
   return 'download';
 }
 function applyRestrictionVisibility(kind) {
-  const isDoc = (kind === 'pdf' || kind === 'docx');
+  // 试看限制（页数/密码）适用于 pdf/docx 与 slide（PPT 转换件也有页概念）；sheet 无页概念不适用
+  const isDoc = (kind === 'pdf' || kind === 'docx' || kind === 'slide');
   const isImage = (kind === 'image');
   document.querySelectorAll('.rest-doc').forEach(e => e.classList.toggle('hidden', !isDoc));
   document.querySelectorAll('.rest-shot').forEach(e => e.classList.toggle('hidden', !(isDoc || isImage)));
