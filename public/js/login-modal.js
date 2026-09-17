@@ -140,6 +140,9 @@
     localStorage.setItem('userToken', token);
     localStorage.setItem('userEmail', email || '');
     close();
+    // 回写 admin.js 的闭包 token，并刷新「我的分享」列表（否则晚于页面解析的登录会让 token 陈旧、改权限弹不出）
+    if (typeof window.__setAdminToken === 'function') window.__setAdminToken(token);
+    if (typeof window.__reloadShares === 'function') window.__reloadShares();
     if (typeof window.afterLogin === 'function') window.afterLogin(email);
     if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: true, isSuper: !!isSuper, email: email });
     if (!silent) {

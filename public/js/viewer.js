@@ -309,7 +309,116 @@ const PDFV = {
   text: null,             // [i] = {str, items:[{start,end,it}]}
   hits: [], hitIdx: -1, kw: '',
   present: false,
+  _est: null,             // 占位尺寸 {w,h}（来自第 1 页视口），铺占位页与缩略图用
+  vis: new Set(),         // 当前处于可视区（含预渲染带）的页码，供缩放重渲染时按需处理
+  rendered: new Set(),    // 当前仍持有像素内存的页码，用于兜底回收
 };
+
+// ---- 大文档惰性渲染 ----
+// 先把全部页的容器按「占位尺寸」铺好（不解析 pdf 页对象、不分配像素内存：
+// canvas 用 1×1 后备存储 + CSS 尺寸撑开），只对进入可视区（含 900px 预渲染带）的页做栅格化。
+// 这样 700+ 页的文档也能秒开：首屏只渲染第 1 页，其余按滚动进度补渲。
+async function pdfEstimateSize() {
+  try {
+    let pg = (PDFV.pages[1] && PDFV.pages[1].page) || await PDFV.doc.getPage(1);
+    const rot = ((pg.rotate || 0) + PDFV.rot) % 360;
+    const vp = pg.getViewport({ scale: 1, rotation: rot });
+    return { w: vp.width, h: vp.height, page: pg };
+  } catch (e) {
+    return { w: 595, h: 842, page: null };   // A4 兜底
+  }
+}
+// 预修正占位尺寸：混合页面尺寸的文档里，占位页全部按第 1 页尺寸铺开，真页渲染时才改
+// 尺寸会造成轻微跳动。页一进入预渲染带就先取真实 viewport 更新占位（顺带同步缩略图比例），
+// 等栅格化完成时占位早已是正确比例，肉眼无感。只解析进入预渲染带的页，不增加首屏成本。
+async function pdfPreSize(i) {
+  const rec = PDFV.pages[i];
+  if (!rec || rec.vp1 || rec.renderScale) return;
+  try {
+    rec.page = rec.page || await PDFV.doc.getPage(i);
+    const rot = ((rec.page.rotate || 0) + PDFV.rot) % 360;
+    rec.vp1 = rec.page.getViewport({ scale: 1, rotation: rot });
+    rec.baseW = rec.vp1.width; rec.baseH = rec.vp1.height;
+    pdfSizePage(rec);
+    // 缩略图占位比例同步修正（未渲染过的才需要；渲染过的 renderThumb 已用真实尺寸）
+    const t = PDFV.thumbs[i];
+    if (t && t.canvas && t.canvas.width === 1 && ZOOM_CFG && ZOOM_CFG.thumbScale) {
+      t.canvas.style.aspectRatio = Math.ceil(rec.vp1.width * ZOOM_CFG.thumbScale) + ' / ' + Math.ceil(rec.vp1.height * ZOOM_CFG.thumbScale);
+    }
+  } catch (e) { /* 解析失败交给 queuePage 的渲染路径兜底 */ }
+}
+function pdfBuildPages(from, to) {
+  const host = $('#pages');
+  const est = PDFV._est || { w: 595, h: 842 };
+  for (let i = from; i <= to; i++) {
+    const wrap = document.createElement('div');
+    wrap.className = 'pg'; wrap.dataset.page = i;
+    const canvas = document.createElement('canvas');
+    const hl = document.createElement('div'); hl.className = 'pg-hl';
+    wrap.appendChild(canvas); wrap.appendChild(hl);
+    host.appendChild(wrap);
+    const rec = { page: null, wrap, canvas, hl, renderScale: 0, baseW: est.w, baseH: est.h, vp1: null, _busy: false };
+    canvas.width = 1; canvas.height = 1;
+    pdfSizePage(rec);
+    PDFV.pages[i] = rec;
+  }
+}
+let pageObs = null, pageQ = Promise.resolve();
+function obsPages() {
+  if (pageObs) pageObs.disconnect();
+  if (!('IntersectionObserver' in window)) {          // 老浏览器兜底：顺序渲染（大文档会很慢，但至少能看）
+    for (let i = 1; i <= PDFV.limit; i++) queuePage(i, BASE_SCALE);
+    return;
+  }
+  pageObs = new IntersectionObserver((ents) => {
+    ents.forEach((en) => {
+      const i = +en.target.dataset.page;
+      if (en.isIntersecting) {
+        PDFV.vis.add(i);
+        const rec = PDFV.pages[i];
+        if (rec && !rec.renderScale) {
+          pdfPreSize(i);         // 进入预渲染带先按真实页尺寸修正占位，消除混合尺寸文档的渲染跳动
+          queuePage(i, BASE_SCALE);
+        }
+      } else {
+        PDFV.vis.delete(i);
+        releasePage(i);          // 离开预渲染带就释放像素内存，滚动到全篇也不会累积爆内存
+      }
+    });
+  }, { rootMargin: '900px 0px' });                    // 提前 900px 预渲染，滚动时不易看到空白
+  PDFV.pages.forEach((r) => { if (r) pageObs.observe(r.wrap); });
+}
+// 释放某页的像素内存，但保留占位尺寸（baseW/baseH 与 canvas 的 CSS 尺寸不动），
+// 这样滚动位置不会跳动；再次滚回来时由观察器重新渲染。
+function releasePage(i) {
+  PDFV.rendered.delete(i);
+  const rec = PDFV.pages[i];
+  if (!rec || !rec.renderScale) return;
+  rec.canvas.width = 1; rec.canvas.height = 1;
+  rec.renderScale = 0;
+  if (rec.hl) rec.hl.innerHTML = '';
+}
+// 兜底回收：万一观察器事件漏了一拍，滚动结束时把「离视口足够远」的页释放掉。
+// 只遍历 rendered 集合（通常就几页），并对每一页读一次几何位置，成本可忽略；
+// 判定带（1400px）远大于预渲染带（900px），所以不会把马上要用到的页回收掉、也不会闪烁。
+function sweepReleased() {
+  if (!PDFV.rendered.size) return;
+  const vh = window.innerHeight, band = 1400;
+  PDFV.rendered.forEach((i) => {
+    const rec = PDFV.pages[i];
+    if (!rec || !rec.wrap.parentNode) { releasePage(i); return; }
+    const r = rec.wrap.getBoundingClientRect();
+    if (r.bottom < -band || r.top > vh + band) releasePage(i);
+  });
+}
+// 串行队列：同一时刻只栅格化一页，避免 pdf.js 并发渲染互相干扰、也避免瞬时内存峰值
+function queuePage(i, scale) {
+  const rec = PDFV.pages[i]; if (!rec) return pageQ;
+  if (rec._busy) return pageQ;
+  rec._busy = true;
+  pageQ = pageQ.then(() => pdfRenderPage(i, scale)).catch(() => {}).then(() => { rec._busy = false; });
+  return pageQ;
+}
 
 async function pdfMakePage(i) {
   const pg = await PDFV.doc.getPage(i);
@@ -328,6 +437,7 @@ async function pdfRenderPage(i, scale) {
   if (!PDFV.doc) return;
   let rec = PDFV.pages[i];
   if (!rec) rec = await pdfMakePage(i);
+  if (!rec.page) rec.page = await PDFV.doc.getPage(i);   // 惰性解析：占位页首次进入可视区时才取页对象
   const s = scale || BASE_SCALE;
   const rot = ((rec.page.rotate || 0) + PDFV.rot) % 360;
   const vp = rec.page.getViewport({ scale: s, rotation: rot });
@@ -338,7 +448,12 @@ async function pdfRenderPage(i, scale) {
   rec.canvas.height = Math.ceil(vp.height);
   rec.renderScale = s;
   pdfSizePage(rec);
-  await rec.page.render({ canvasContext: rec.canvas.getContext('2d'), viewport: vp }).promise;
+  try {
+    await rec.page.render({ canvasContext: rec.canvas.getContext('2d'), viewport: vp }).promise;
+  } catch (e) { rec.renderScale = 0; return; }
+  PDFV.rendered.add(i);
+  // 惰性渲染下，搜索命中的页往往是「渲染完成后」才拿到 vp1，这里补绘一次高亮，否则高亮会丢
+  if (PDFV.hits.length) pdfRefreshHl();
 }
 function pdfSizePage(rec) {
   rec.canvas.style.width = Math.round(rec.baseW * PDFV.display) + 'px';
@@ -371,10 +486,11 @@ function renderUnlockBox(limit, total) {
       if (!r.ok) { $('#unlockErr').textContent = d.message || '密码错误'; return; }
       needProtect = false;
       box.remove();
-      // 解锁后把剩余页补齐，并同步可搜索范围与缩略图
+      // 解锁后把剩余页补齐（同样走惰性渲染），并同步可搜索范围与缩略图
       PDFV.limit = PDFV.total;
-      for (let i = limit + 1; i <= total; i++) await pdfRenderPage(i);
+      pdfBuildPages(limit + 1, total);
       buildThumbs();
+      obsPages();
       pdfTrackPage();
     } catch (e) { $('#unlockErr').textContent = '网络错误，请重试'; }
   };
@@ -384,6 +500,9 @@ function renderUnlockBox(limit, total) {
 async function loadContent(k) {
   if (k === 'pdf') {
     PDFV.pages = []; PDFV.rot = 0; PDFV.view = 'single'; PDFV.hits = []; PDFV.hitIdx = -1; PDFV.text = null;
+    PDFV.vis = new Set(); PDFV.rendered = new Set(); PDFV._est = null;
+    $('#pages').innerHTML = '';        // 清掉上一次的页容器（重新加载/切换文件时）
+    $('#pages').className = '';        // 清掉 mode-double / mode-book / zoomed 残留
     if (!window.pdfjsLib) { $('#pages').innerHTML = '<p class="sub">PDF 组件加载失败（本地 PDF.js 缺失）</p>'; return; }
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
     // 用 URL 流式加载：pdf.js 按页 Range 拉取，第一页先出，无需整本下载解析完才显示。
@@ -398,7 +517,13 @@ async function loadContent(k) {
     initPdfReader();
     const limit = previewPages && previewPages < totalPages ? previewPages : totalPages;
     PDFV.limit = limit;
-    for (let i = 1; i <= limit; i++) await pdfRenderPage(i);
+    // 关键：先「铺占位页 + 建缩略图」，再由观察器惰性渲染可见页。
+    // 旧实现是 await 逐页渲染到 limit 之后才 buildThumbs()，遇到 791 页的大文档时
+    // 缩略图抽屉会长时间空白（本次修的 bug），而且会一次性把全部页栅格化，内存直接爆掉。
+    const est = await pdfEstimateSize();
+    PDFV._est = { w: est.w, h: est.h };
+    pdfBuildPages(1, limit);
+    if (est.page) PDFV.pages[1].page = est.page;      // 第 1 页页对象已经拿到，别再取一次
     // 预览页数限制：未渲染的后续页暂不展示；如需密码保护则显示解锁表单
     if (limit < totalPages) {
       if (needProtect) renderUnlockBox(limit, totalPages);
@@ -411,7 +536,9 @@ async function loadContent(k) {
       }
     }
     pdfFitWidth();          // 初始进入自动适应宽度（手机竖屏下比 100% 更好用）
-    buildThumbs();
+    buildThumbs();          // 缩略图立刻可用，不必等页面渲染完
+    obsPages();             // 惰性渲染可见页
+    queuePage(1, BASE_SCALE);
     pdfTrackPage();
     return;
   }
@@ -527,13 +654,17 @@ function pdfEnsureCrisp() {
   if (crispTimer) clearTimeout(crispTimer);
   crispTimer = setTimeout(async () => {
     const need = Math.min(ZOOM_CFG.pdfCrispCap, BASE_SCALE * PDFV.display);
-    const vh = window.innerHeight;
-    for (const rec of PDFV.pages) {
+    // 只处理「当前在可视区」的页：旧实现对每一页都做 getBoundingClientRect，
+    // 791 页时每次缩放要读近 800 次布局 —— 换成观察器维护的可见页集合后基本零成本。
+    let list = Array.from(PDFV.vis || []);
+    if (!list.length) {
+      for (let i = Math.max(1, PDFV.cur - 2); i <= Math.min(PDFV.total, PDFV.cur + 2); i++) list.push(i);
+    }
+    for (const i of list) {
+      const rec = PDFV.pages[i];
       if (!rec || !rec.canvas || !rec.wrap.parentNode) continue;
-      const r = rec.wrap.getBoundingClientRect();
-      if (r.bottom < 0 || r.top > vh) continue;          // 只重渲染可见页，省流量
       if (rec.renderScale >= need - ZOOM_CFG.pdfCrispMargin) continue;
-      try { await pdfRenderPage(+rec.wrap.dataset.page, need); } catch (e) {}
+      await queuePage(i, need);
     }
     pdfRefreshHl();                                       // 高亮坐标依赖显示倍率，缩放后统一重绘
     pdfTrackPage();
@@ -598,20 +729,25 @@ function updatePageUI() {
   if (pr) pr.textContent = PDFV.cur + ' / ' + PDFV.total;
   const st = $('#vStatus');
   if (st) st.textContent = '第 ' + PDFV.cur + ' 页 · 共 ' + PDFV.total + ' 页';
-  if (PDFV.thumbs.length) {
-    PDFV.thumbs.forEach((t2) => { if (t2 && t2.el) t2.el.classList.remove('active'); });
-    const cur = PDFV.thumbs[PDFV.cur];
-    if (cur && cur.el) cur.el.classList.add('active');
-  }
+  // 只切换「上一个/当前」两个缩略图（旧实现每次都把全部缩略图 classList.remove 一遍，
+  // 791 页文档滚动时每个页码变化都要动 791 个节点，明显拖慢滚动）
+  const prev = PDFV.thumbs[lastActiveThumb];
+  if (prev && prev.el && lastActiveThumb !== PDFV.cur) prev.el.classList.remove('active');
+  const cur = PDFV.thumbs[PDFV.cur];
+  if (cur && cur.el) { cur.el.classList.add('active'); lastActiveThumb = PDFV.cur; }
 }
 function pdfTrackPage() {
   if (!PDFV.total) return;
-  const h = window.innerHeight;
-  let cur = PDFV.cur;
-  for (let i = 1; i <= PDFV.total; i++) {
-    const rec = PDFV.pages[i]; if (!rec || !rec.wrap.parentNode) continue;
-    const r = rec.wrap.getBoundingClientRect();
-    if (r.top <= h * 0.45) cur = i;
+  const n = PDFV.total;
+  const anchor = window.innerHeight * 0.45;
+  const topOf = (i) => { const r = PDFV.pages[i]; return (r && r.wrap.parentNode) ? r.wrap.getBoundingClientRect().top : Infinity; };
+  // top(i) 随 i 单调不减 → 二分找「最后一个 top<=anchor」的页。
+  // 旧实现每滚一下都对全部页做 getBoundingClientRect，791 页时每次滚动读近 800 次布局（明显卡顿），
+  // 二分后固定约 10 次，且大幅拖动滚动条也能准确定位。
+  let lo = 1, hi = n, cur = 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (topOf(mid) <= anchor) { cur = mid; lo = mid + 1; } else { hi = mid - 1; }
   }
   if (cur !== PDFV.cur) {
     PDFV.cur = cur; updatePageUI();
@@ -619,7 +755,11 @@ function pdfTrackPage() {
     if (cur !== lastPage) { lastPage = cur; report('progress', 'p' + cur + '/' + PDFV.total); }
   }
 }
-window.addEventListener('scroll', pdfTrackPage, { passive: true });
+let trackRaf = 0;
+window.addEventListener('scroll', () => {
+  if (trackRaf) return;
+  trackRaf = requestAnimationFrame(() => { trackRaf = 0; pdfTrackPage(); sweepReleased(); });
+}, { passive: true });
 window.addEventListener('resize', () => { pdfTrackPage(); });
 
 function pdfGoPage(n, smooth) {
@@ -638,13 +778,19 @@ async function pdfRotate(delta) {
   if (!PDFV.doc) return;
   PDFV.rot = ((PDFV.rot + delta) % 360 + 360) % 360;
   const keep = PDFV.cur;
+  // 只「失效 + 换占位尺寸」，不立刻全量重渲染：可见页随后由观察器按需补渲。
+  // 旧实现对每一页都 await 重渲染，791 页文档点一次旋转要等到天荒地老。
   for (let i = 1; i <= PDFV.limit; i++) {
     const rec = PDFV.pages[i]; if (!rec) continue;
-    rec.canvas.width = 1; rec.canvas.height = 1;    // 先释放旧画布，避免 pdf.js 尺寸校验报错
-    try { await pdfRenderPage(i, BASE_SCALE); } catch (e) {}
+    rec.renderScale = 0;
+    const t = rec.baseW; rec.baseW = rec.baseH; rec.baseH = t;   // 宽高互换占位，避免旋转瞬间布局跳动
+    rec.canvas.width = 1; rec.canvas.height = 1;                // 释放旧画布，避免 pdf.js 尺寸校验报错
+    pdfSizePage(rec);
   }
   pdfSetView(PDFV.view);        // 重新排版（旋转后宽高互换，需重算适配）
+  PDFV.rendered.clear();        // 全部已失效，回收集合同步清空
   pdfGoPage(keep);
+  obsPages();                   // 重新评估可见页并补渲
   rebuildThumbs();
   toast('已旋转 ' + PDFV.rot + '°');
 }
@@ -657,16 +803,25 @@ function pdfSetView(v) {
 }
 
 // ---------- 缩略图抽屉 ----------
+let lastActiveThumb = 0;
 function buildThumbs() {
   const list = $('#tList');
   if (!list || !PDFV.doc) return;
   list.innerHTML = '';
   PDFV.thumbs = [];
+  lastActiveThumb = 0;
   const total = PDFV.limit || PDFV.total;
+  // 缩略图占位：canvas 只给 1×1 后备存储（不占内存），用 aspect-ratio 撑出与页面同比例的高度。
+  // 791 页若都按 thumbScale 分配像素，光占位就要几十 MB；这样处理后只有真正渲染过的缩略图才占内存。
+  const est = PDFV._est || { w: 595, h: 842 };
+  const tw = Math.max(1, Math.round(est.w * ZOOM_CFG.thumbScale));
+  const th = Math.max(1, Math.round(est.h * ZOOM_CFG.thumbScale));
   for (let i = 1; i <= total; i++) {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'titem'; b.dataset.page = i;
     const c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    c.style.aspectRatio = tw + ' / ' + th;
     const n = document.createElement('b'); n.textContent = i;
     b.appendChild(c); b.appendChild(n);
     b.addEventListener('click', () => { pdfGoPage(i, true); closeThumbs(); });
@@ -680,9 +835,16 @@ let thumbObs = null;
 function obsThumbs() {
   if (thumbObs) thumbObs.disconnect();
   if (!('IntersectionObserver' in window)) { PDFV.thumbs.forEach((t, i) => { if (t) queueThumb(i); }); return; }
+  // 注意：观察基准用「视口」而不是 #tPane。
+  // 抽屉关闭时靠 transform 移到屏幕外，用视口做基准能天然判为「不可见」→ 不渲染；
+  // 抽屉一打开，缩略图进入视口才会触发渲染。用 #tPane 当 root 时关闭状态下容易判定异常。
   thumbObs = new IntersectionObserver((ents) => {
-    ents.forEach((en) => { if (en.isIntersecting) queueThumb(+en.target.dataset.page); });
-  }, { root: $('#tPane'), rootMargin: '150px 0px' });
+    ents.forEach((en) => {
+      const i = +en.target.dataset.page;
+      if (en.isIntersecting) queueThumb(i);
+      else releaseThumb(i);        // 滚出抽屉视口就释放，791 页也不会把缩略图全驻留内存
+    });
+  }, { rootMargin: '200px 0px' });
   PDFV.thumbs.forEach((t) => { if (t && t.el) thumbObs.observe(t.el); });
 }
 // 串行队列：避免同一 page 对象被并发渲染（pdf.js 对同页并发 render 会互相干扰）
@@ -694,28 +856,48 @@ function queueThumb(i) {
   thumbQ = thumbQ.then(() => renderThumb(i)).catch(() => {});
 }
 async function renderThumb(i) {
-  const t = PDFV.thumbs[i]; if (!t) return;
+  const t = PDFV.thumbs[i];
+  if (!t || !t.done) return;                    // 已被释放/重排队则跳过这次渲染
   const rec = PDFV.pages[i];
   const pg = (rec && rec.page) || await PDFV.doc.getPage(i);
   const rot = ((pg.rotate || 0) + PDFV.rot) % 360;
   const vp = pg.getViewport({ scale: ZOOM_CFG.thumbScale, rotation: rot });
   t.canvas.width = Math.ceil(vp.width);
   t.canvas.height = Math.ceil(vp.height);
-  try { await pg.render({ canvasContext: t.canvas.getContext('2d'), viewport: vp }).promise; } catch (e) {}
+  t.canvas.style.aspectRatio = Math.ceil(vp.width) + ' / ' + Math.ceil(vp.height);
+  try {
+    await pg.render({ canvasContext: t.canvas.getContext('2d'), viewport: vp }).promise;
+    thumbHintDone();                  // 首张缩略图出来就收起「正在生成缩略图…」提示
+  } catch (e) { t.done = false; }   // 失败允许下次进入视口时重试
+}
+function releaseThumb(i) {
+  const t = PDFV.thumbs[i];
+  if (!t || !t.done) return;
+  t.canvas.width = 1; t.canvas.height = 1;   // 只回收像素内存；aspect-ratio 仍撑着占位高度，不会跳版
+  t.done = false;
 }
 function rebuildThumbs() { buildThumbs(); }
 function openThumbs() {
-  $('#tPane').classList.add('open');
+  const pane = $('#tPane');
+  pane.classList.add('open');
+  pane.removeAttribute('inert');
   $('#tMask').hidden = false;
   $('#thumbBtn').classList.add('on');
+  obsThumbs();          // 抽屉位置变化后重新评估可见缩略图，保证一打开就开始渲染
   const cur = PDFV.thumbs[PDFV.cur];
-  if (cur && cur.el) setTimeout(() => cur.el.scrollIntoView({ block: 'center' }), 60);
+  if (cur && cur.el) setTimeout(() => {
+    // 直接改抽屉滚动位置，避免 scrollIntoView 把主文档也一起滚走
+    pane.scrollTop = cur.el.offsetTop - pane.clientHeight / 2 + cur.el.offsetHeight / 2;
+  }, 60);
 }
 function closeThumbs() {
-  $('#tPane').classList.remove('open');
+  const pane = $('#tPane');
+  pane.classList.remove('open');
+  pane.setAttribute('inert', '');   // 收起后不可聚焦，避免键盘 Tab 跑进看不见的抽屉
   $('#tMask').hidden = true;
   $('#thumbBtn').classList.remove('on');
 }
+function thumbHintDone() { const h = $('#tHint'); if (h) h.style.display = 'none'; }
 function toggleThumbs() { $('#tPane').classList.contains('open') ? closeThumbs() : openThumbs(); }
 
 // ---------- 文档内搜索（安全版：只定位，不给文字层）----------
@@ -737,13 +919,16 @@ function closeSearch() {
   pdfRefreshHl();
 }
 // 建立文字索引：只把文字读进内存，绝不写进 DOM —— 这是「能搜到但选不中」的关键
-async function ensureTextIndex() {
+async function ensureTextIndex(onProgress) {
   if (PDFV.text) return PDFV.text;
   const out = [];
   const max = PDFV.limit || PDFV.total;
   for (let i = 1; i <= max; i++) {
     try {
-      const pg = PDFV.pages[i] ? PDFV.pages[i].page : await PDFV.doc.getPage(i);
+      const rec = PDFV.pages[i];
+      // 惰性渲染下 rec 存在但 rec.page 可能还是 null（该页还没进过可视区），必须回源取一次
+      const pg = (rec && rec.page) || await PDFV.doc.getPage(i);
+      if (rec && !rec.page) rec.page = pg;                  // 顺手缓存，省得渲染时再取
       const tc = await pg.getTextContent();
       const items = [];
       let str = '';
@@ -755,6 +940,7 @@ async function ensureTextIndex() {
       }
       out[i] = { str: str.toLowerCase(), raw: str, items };
     } catch (e) { out[i] = { str: '', raw: '', items: [] }; }
+    if (onProgress && (i % 8 === 0 || i === max)) onProgress(i, max);
   }
   PDFV.text = out;
   return out;
@@ -766,7 +952,7 @@ async function doSearch(kw) {
   PDFV.hits = []; PDFV.hitIdx = -1;
   if (!kw) { info.textContent = ''; pdfRefreshHl(); return; }
   info.textContent = '查找中…';
-  const idx = await ensureTextIndex();
+  const idx = await ensureTextIndex((i, n) => { info.textContent = '建立索引 ' + i + '/' + n + '…'; });
   const needle = kw.toLowerCase();
   const hits = [];
   const max = PDFV.limit || PDFV.total;
@@ -850,13 +1036,17 @@ function weightedRatio(str, i0, i1) {
   if (!total) return [0, 1];
   return [before / total, (before + span) / total];
 }
+let hlPages = [];   // 上一次真正画过高亮的页，重绘时只清这些页（避免每次都遍历全部页）
 function pdfRefreshHl() {
-  PDFV.pages.forEach((r) => { if (r && r.hl) r.hl.innerHTML = ''; });
+  const touch = new Set(hlPages);
+  PDFV.hits.forEach((h) => touch.add(h.page));
+  touch.forEach((p) => { const r = PDFV.pages[p]; if (r && r.hl) r.hl.innerHTML = ''; });
+  hlPages = [];
   if (!PDFV.hits.length) return;
   const disp = PDFV.display;
   PDFV.hits.forEach((h, hi) => {
     const rec = PDFV.pages[h.page];
-    if (!rec || !rec.vp1) return;
+    if (!rec || !rec.vp1 || !rec.renderScale) return;   // 该页当前没渲染（或已被释放）→ 等它渲染完成时补绘
     h.rs.forEach((r) => {
       let b;
       try { b = itemAABB(r.it, rec.vp1, r.s0f, r.s1f); } catch (e) { return; }
@@ -869,6 +1059,7 @@ function pdfRefreshHl() {
       if (hi === PDFV.hitIdx) el.className = 'cur';
       rec.hl.appendChild(el);
     });
+    hlPages.push(h.page);
   });
 }
 

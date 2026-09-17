@@ -41,6 +41,11 @@ const confirmDialog = (message, opts = {}) => openDialog({ message, ...opts });
 const alertDialog = (message, opts = {}) => openDialog({ message, single: true, ...opts });
 
 let token = localStorage.getItem('userToken');
+// 登录（弹窗 / 自动登录 / 重新登录）成功后由 login-modal.js 调 __setAdminToken 回写闭包，
+// 否则 token 仍是页面解析时的快照，会导致「改权限」等所有 /api/admin 请求用陈旧 token 失败、弹窗打不开。
+window.__setAdminToken = (t) => { token = t || localStorage.getItem('userToken') || token; };
+// 晚于页面解析的登录不会自动触发 load()，这里补一次列表刷新（同时清掉「请先登录」占位）。
+window.__reloadShares = () => { panelLoaded.mine = false; load(); };
 // 安全：后台界面必须登录后才能进入。不再使用 ownerToken（匿名创建者无法进入管理后台）。
 const userArea = document.getElementById('userArea');
 function logout() { localStorage.removeItem('userToken'); localStorage.removeItem('userEmail'); localStorage.removeItem('savedLogin'); location.href = '/'; }
@@ -49,6 +54,8 @@ function showLogin() {
   document.getElementById('loginLink').onclick = (e) => { e.preventDefault(); if (window.openLoginModal) window.openLoginModal(); };
 }
 function showUser(email) {
+  // 重新从 localStorage 同步最新 token（登录/重置账号后闭包 token 可能陈旧）
+  token = localStorage.getItem('userToken') || token;
   const safe = String(email || '已登录').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   userArea.innerHTML = `👤 ${safe} · <a href="#" id="logoutLink">退出</a>`;
   document.getElementById('logoutLink').onclick = (e) => { e.preventDefault(); logout(); };
@@ -499,8 +506,15 @@ function applySettingsLocal(x, s) {
 let editId = null;
 window.editShare = async (id) => {
   editId = id;
-  const r = await fetch(`/api/admin/${token}`); const d = await r.json();
-  const s = d.shares.find(x => x.shareId === id);
+  // token 实时读取（闭包 token 可能因晚登录而陈旧），失败也能优雅提示而非抛错中断弹窗
+  const tk = token || localStorage.getItem('userToken');
+  if (!tk) { alertDialog('登录状态已失效，请重新登录后重试'); return; }
+  const r = await fetch(`/api/admin/${tk}`);
+  if (!r.ok) { alertDialog('加载分享信息失败（' + r.status + '），请刷新后重试'); return; }
+  const d = await r.json();
+  const shares = Array.isArray(d.shares) ? d.shares : [];
+  const s = shares.find(x => x.shareId === id);
+  if (!s) { alertDialog('未找到该分享，请刷新页面后重试'); return; }
   const extra = s.extra || {};
   const pp = Number(extra.previewPages) || 0;
   const pEnabled = pp > 0;
