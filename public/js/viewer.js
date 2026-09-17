@@ -547,6 +547,7 @@ async function loadContent(k) {
     // 直接给 <img> 设 URL：浏览器原生支持 Range 与缓存，超大图首屏更快、且可复用服务端字节区间
     const img = document.createElement('img');
     img.src = '/api/content/' + shareId + '?at=' + accessToken;
+    img.decoding = 'async';   // 解码不阻塞主线程
     img.draggable = false;
     img.onerror = () => { $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">图片加载失败或被拒绝</p>'); };
     $('#imgWrap').style.display = 'block';
@@ -1262,18 +1263,24 @@ function imgApply() { if (imgContent) { imgContent.style.transform = `translate(
 function imgSetScale(v) { imgScale = Math.min(MAX_DISP, Math.max(MIN_DISP, v)); imgClamp(); imgApply(); }
 function imgFit() {
   if (!imgStage || !imgContent) return;
+  const sw = imgStage.clientWidth, sh = imgStage.clientHeight;
+  if (!sw || !sh) return;                       // 布局未就绪（隐藏/未插入），等下一次触发
   const imgEl = imgContent.querySelector('img'); if (!imgEl) return;
   const nw = imgEl.naturalWidth || imgEl.width, nh = imgEl.naturalHeight || imgEl.height;
-  const f = Math.min((imgStage.clientWidth / (nw || 1)) || 1, (imgStage.clientHeight / (nh || 1)) || 1, 1);
-  imgScale = f || 1;
-  imgX = (imgStage.clientWidth - nw * imgScale) / 2;
-  imgY = (imgStage.clientHeight - nh * imgScale) / 2;
-  imgApply();
+  if (!nw || !nh) return;                       // 图片尺寸未知（未解码完），不猜
+  // 适应窗口：宽高都装下（只缩小不放大于原尺寸）；位置统一交给 imgClamp 居中/夹边，
+  // 避免 fit 手算偏移在异常布局下把图片平移出视口（超大图"打开看不到"的根因）
+  imgScale = Math.min(sw / nw, sh / nh, 1);
+  imgX = 0; imgY = 0;
+  imgClamp(); imgApply();
 }
 function imgClamp() {
   if (!imgStage || !imgContent) return;
   const sw = imgStage.clientWidth, sh = imgStage.clientHeight;
-  const cw = imgContent.offsetWidth * imgScale, ch = imgContent.offsetHeight * imgScale;
+  // 用 img 本身的布局尺寸（zcontent 是块级元素，宽度恒等于 stage 宽，
+  // 超出部分的图片内容不计入，用它会算错居中/夹边位置）
+  const el = imgContent.querySelector('img') || imgContent;
+  const cw = el.offsetWidth * imgScale, ch = el.offsetHeight * imgScale;
   if (cw <= sw) imgX = (sw - cw) / 2; else imgX = Math.min(0, Math.max(sw - cw, imgX));
   if (ch <= sh) imgY = (sh - ch) / 2; else imgY = Math.min(0, Math.max(sh - ch, imgY));
 }
@@ -1286,7 +1293,16 @@ function enableImageZoom(imgEl) {
   imgStage.appendChild(imgContent); imgContent.appendChild(imgEl);
   imgEl.style.maxWidth = 'none'; imgEl.style.width = 'auto'; imgEl.style.height = 'auto'; imgEl.draggable = false;
   ensureZbar(); setZpct(1);
-  const fit = () => imgFit();
+  // 大图（印刷级 JPG 动辄几十 MB）下载 + 解码可能十几秒，期间一片空白像"打不开"——给明确占位反馈
+  const ph = document.createElement('div');
+  ph.className = 'img-loading';
+  ph.innerHTML = '<div class="spin"></div><div class="ltxt">图片加载中…大文件可能需要十几秒</div>';
+  imgStage.appendChild(ph);
+  imgEl.addEventListener('error', () => {
+    ph.classList.add('err');
+    const t = ph.querySelector('.ltxt'); if (t) t.textContent = '图片加载失败';
+  }, { once: true });
+  const fit = () => { ph.remove(); imgFit(); };
   if (imgEl.complete) fit(); else imgEl.onload = fit;
   imgStage.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -1326,6 +1342,8 @@ function enableImageZoom(imgEl) {
     if (e.touches.length === 1) last = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   });
   imgStage.addEventListener('dblclick', () => imgSetScale(imgScale > 1.05 ? 1 : ZOOM_CFG.dblClickToggle));
+  // 转屏/改窗口尺寸后重新适配窗口（手机横竖切换常见），保持图片始终可见
+  window.addEventListener('resize', () => { if (zoomMode === 'image' && imgStage && imgStage.isConnected) imgFit(); });
 }
 function touchDist(e) { const a = e.touches[0], b = e.touches[1]; return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
 function touchMid(e) { const a = e.touches[0], b = e.touches[1]; return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }; }
