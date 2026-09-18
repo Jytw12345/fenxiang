@@ -169,4 +169,43 @@ async function generateSlidePdf(ext, buf) {
   }
 }
 
-module.exports = { generatePreview, generateSlidePdf, SOURCE_EXTS };
+// 超大图片降采样：移动端 GPU 单张纹理有上限（常见 4096~16384px），超大位图超出部分直接
+// 不渲染（表现为"图片只显示一半/大片空白"）。生成一张长边 ≤ maxSide 的 JPEG 给查看器用，
+// 原文件下载不受影响。成功返回 { ok:true, buffer, format:'jpg' }。
+const IMAGE_DOWNSCALE_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
+async function generateImageDownscale(ext, buf, maxSide) {
+  if (config.PREVIEW_ENABLED === false) return { ok: false, reason: 'disabled' };
+  ext = (ext || '').toLowerCase();
+  if (!IMAGE_DOWNSCALE_EXTS.includes(ext)) return { ok: false, reason: 'unsupported_ext' };
+  const py = detectPython();
+  if (!py) return { ok: false, reason: 'no_python' };
+
+  const tmp = os.tmpdir();
+  const id = crypto.randomBytes(8).toString('hex');
+  const inPath = path.join(tmp, `imgds_in_${id}${ext}`);
+  const outPath = path.join(tmp, `imgds_out_${id}.jpg`);
+  try {
+    fs.writeFileSync(inPath, buf);
+    const env = Object.assign({}, process.env, { PREVIEW_MAX_DIM: String(maxSide || 4096) });
+    const code = await new Promise((resolve) => {
+      let done = false, proc;
+      const finish = (c) => { if (!done) { done = true; resolve(c); } };
+      try { proc = spawn(py, [path.join(__dirname, 'preview_worker.py'), inPath, outPath], { windowsHide: true, env }); }
+      catch (e) { return finish(-1); }
+      const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} finish(-2); }, PREVIEW_TIMEOUT);
+      proc.on('error', () => finish(-1));
+      proc.on('close', (c) => { clearTimeout(t); finish(c === null ? -1 : c); });
+    });
+    if (code === 0 && fs.existsSync(outPath)) {
+      return { ok: true, buffer: fs.readFileSync(outPath), format: 'jpg' };
+    }
+    return { ok: false, reason: 'no_backend_or_failed' };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message) };
+  } finally {
+    try { fs.unlinkSync(inPath); } catch (e) {}
+    try { fs.unlinkSync(outPath); } catch (e) {}
+  }
+}
+
+module.exports = { generatePreview, generateSlidePdf, generateImageDownscale, SOURCE_EXTS };

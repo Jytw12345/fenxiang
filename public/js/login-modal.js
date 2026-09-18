@@ -74,10 +74,33 @@
   }
 
   // 邮箱密码登录（自托管或 Supabase 两条路径），供 submit 与自动登录复用
+  // 常见英文报错 → 中文（Supabase Auth 返回英文 message；本地接口偶有英文 error code）
+  const ERR_ZH = [
+    [/invalid login credentials/i, '邮箱或密码不正确'],
+    [/user already registered|already been registered|already exists|email_exists/i, '该邮箱已注册，请直接登录'],
+    [/email not confirmed/i, '邮箱尚未验证，请先查收验证邮件'],
+    [/password should be at least/i, '密码长度不足，请查看密码要求'],
+    [/signups? not allowed|signup_disabled|reg_disabled/i, '当前未开放注册，请联系管理员'],
+    [/rate limit|too many requests|every \d+ seconds/i, '操作太频繁，请稍后再试'],
+    [/invalid format|invalid email/i, '邮箱格式不正确'],
+    [/failed to fetch|networkerror|network error|load failed/i, '网络异常，请检查网络后重试'],
+    [/timeout|timed out/i, '请求超时，请重试'],
+    [/new password should be different/i, '新密码不能与旧密码相同'],
+    [/anonymous sign-?ins? are disabled/i, '当前不支持匿名登录'],
+    [/real_name_required/i, '请填写真实姓名'],
+    [/invite_required|invalid_invite/i, '邀请码无效或必填'],
+    [/weak_password/i, '密码强度不足'],
+    [/captcha|human verification/i, '人机验证未通过，请重试'],
+  ];
+  function zhErr(m) {
+    if (!m) return m;
+    for (const [re, zh] of ERR_ZH) if (re.test(m)) return zh;
+    return m;
+  }
   async function performLogin(email, pw) {
     if (sb) {
       const r = await sb.auth.signInWithPassword({ email, password: pw });
-      if (r.error) throw new Error(r.error.message || '登录失败');
+      if (r.error) throw new Error(zhErr(r.error.message) || '登录失败');
       const sess = r.data && r.data.session;
       if (!sess) throw new Error('未获取到会话');
       const boot = await bootstrap(sess.access_token, email);
@@ -88,7 +111,7 @@
       body: JSON.stringify({ email, password: pw })
     });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.message || d.error || '登录失败');
+    if (!r.ok) throw new Error(zhErr(d.message || d.error) || '登录失败');
     return { token: d.userToken, email: d.email, isSuper: !!d.isSuper };
   }
 
@@ -108,7 +131,7 @@
       if (loginMode === 'register') {
         if (sb) {
           const r = await sb.auth.signUp({ email, password: pw });
-          if (r.error) { msg.textContent = r.error.message || '失败'; return; }
+          if (r.error) { msg.textContent = zhErr(r.error.message) || '注册失败，请稍后重试'; return; }
           const sess = r.data && r.data.session;
           if (!sess) { msg.textContent = '注册成功，请查收验证邮件后再登录'; return; }
           const boot = await bootstrap(sess.access_token, email);
@@ -122,7 +145,7 @@
             })
           });
           const d = await r.json();
-          if (!r.ok) { msg.textContent = d.message || d.error || '失败'; return; }
+          if (!r.ok) { msg.textContent = zhErr(d.message || d.error) || '注册失败，请稍后重试'; return; }
           done(d.userToken, d.email, d.isSuper);
         }
         return;
@@ -132,7 +155,7 @@
       // 记住密码：勾选则保存，否则清除历史保存
       if (remember) saveCreds(email, pw); else clearCreds();
       done(res.token, res.email, res.isSuper);
-    } catch (e) { msg.textContent = e.message || '网络错误'; }
+    } catch (e) { msg.textContent = zhErr(e.message) || '网络错误'; }
     finally { btn.disabled = false; }
   }
 

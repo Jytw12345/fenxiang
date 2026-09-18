@@ -602,9 +602,18 @@ async function loadContent(k) {
   if (k === 'sheet') { await loadSheet(); return; }
 
   if (k === 'image') {
+    // 先探测后端是否已有降采样预览（超大图缓存）：有则直接用小图（省流量 + 避开移动端纹理上限），无则用原图
+    let srcUrl = '/api/content/' + shareId + '?at=' + accessToken;
+    try {
+      const probe = await fetch('/api/preview/' + shareId + '?at=' + accessToken);
+      if (probe.ok) {
+        const blob = await probe.blob();
+        srcUrl = URL.createObjectURL(blob);
+      }
+    } catch (e) { /* 探测失败用原图 */ }
     // 直接给 <img> 设 URL：浏览器原生支持 Range 与缓存，超大图首屏更快、且可复用服务端字节区间
     const img = document.createElement('img');
-    img.src = '/api/content/' + shareId + '?at=' + accessToken;
+    img.src = srcUrl;
     img.decoding = 'async';   // 解码不阻塞主线程
     img.draggable = false;
     img.onerror = () => { $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">图片加载失败或被拒绝</p>'); };
@@ -1345,8 +1354,18 @@ function sizeStage() {
   const av = stageAvail();
   const vw = el.offsetWidth * imgScale, vh = el.offsetHeight * imgScale;
   imgStage.style.width = Math.max(120, Math.min(av.w, vw)) + 'px';
-  imgStage.style.height = Math.max(120, Math.min(av.h, vh)) + 'px';
+  if (imgLongMode) {
+    // 长图模式：高度=图片视觉高度（可远超视口，页面纵向滚动看全图）；触摸放开纵向给页面滚动
+    imgStage.style.height = Math.max(120, vh) + 'px';
+    imgStage.style.touchAction = 'pan-y';
+  } else {
+    imgStage.style.height = Math.max(120, Math.min(av.h, vh)) + 'px';
+    imgStage.style.touchAction = 'none';
+  }
 }
+// 竖长图模式（高/宽 > 2.2 且高度适配后过窄）：宽度撑满 + 容器高度=图片视觉高度（页面纵向滚动），
+// 触摸纵向滑动交给页面滚动（像朋友圈长图），横向仍可拖移，双指捏合缩放保留
+let imgLongMode = false;
 function imgFit() {
   if (!imgStage || !imgContent) return;
   const av = stageAvail();
@@ -1357,6 +1376,14 @@ function imgFit() {
   // 适应窗口：宽高都装下（只缩小不放大于原尺寸）；位置统一交给 imgClamp 居中/夹边，
   // 避免 fit 手算偏移在异常布局下把图片平移出视口（超大图"打开看不到"的根因）
   imgScale = Math.min(sw / nw, sh / nh, 1);
+  // 竖长图且高度适配后过窄 → 改用宽度撑满（页面滚动看全图），否则 7% 缩放什么也看不清
+  if (nh / nw > 2.2 && (sh / nh) * nw < 320) {
+    imgLongMode = true;
+    imgScale = sw / nw;
+  } else {
+    imgLongMode = false;
+    imgScale = Math.min(sw / nw, sh / nh, 1);
+  }
   // 缩放范围跟随适宽结果（下限留一半余量；上限到 1× 原图像素即够看细节）
   imgMinScale = Math.min(ZOOM_CFG.min, imgScale * 0.5);
   imgMaxScale = Math.min(ZOOM_CFG.max, Math.max(1, imgScale * 8));
@@ -1392,7 +1419,32 @@ function enableImageZoom(imgEl) {
     ph.classList.add('err');
     const t = ph.querySelector('.ltxt'); if (t) t.textContent = '图片加载失败';
   }, { once: true });
-  const fit = () => { ph.remove(); imgFit(); };
+  // 超大图检测：移动端 GPU 单张纹理有上限（4096~16384px），超大位图超出部分不渲染
+  // （表现为"图片只显示一半/大片空白"）。超限则请后端生成降采样预览并换源；已换源不再重复。
+  let usingDownscaled = !!imgEl.src.startsWith('blob:');
+  const maybeDownscale = async () => {
+    if (usingDownscaled) return;
+    const nw = imgEl.naturalWidth, nh = imgEl.naturalHeight;
+    if (!nw || !nh) return;
+    if (nw <= 8192 && nh <= 8192 && nw * nh <= 32e6) return;   // 安全区内，无需处理
+    usingDownscaled = true;
+    const tip = document.createElement('div');
+    tip.className = 'img-loading';
+    tip.innerHTML = '<div class="spin"></div><div class="ltxt">图片尺寸较大，正在生成适配预览…</div>';
+    imgStage.appendChild(tip);
+    try {
+      // gen=1：显式请求生成（探针不带 gen，只查缓存，避免给普通图做无谓降采样）
+      const r = await fetch('/api/preview/' + shareId + '?at=' + accessToken + '&gen=1');
+      if (!r.ok) throw new Error('no_preview');
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      imgEl.onload = () => { tip.remove(); imgFit(); };   // 新图解码完成后重新适配
+      imgEl.src = url;
+    } catch (e) {
+      tip.remove();   // 生成失败：保持原图（桌面端通常能正常显示），不打断
+    }
+  };
+  const fit = () => { ph.remove(); imgFit(); maybeDownscale(); };
   if (imgEl.complete) fit(); else imgEl.onload = fit;
   imgStage.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -1414,7 +1466,8 @@ function enableImageZoom(imgEl) {
   }, { passive: true });
   imgStage.addEventListener('touchmove', (e) => {
     e.preventDefault();
-    if (e.touches.length === 1 && last) {
+    if (e.touches.length === 1 && last && !imgLongMode) {
+      // 长图模式下单指纵向滑动交给页面滚动，不做拖移
       imgX += e.touches[0].clientX - last.x; imgY += e.touches[0].clientY - last.y;
       last = { x: e.touches[0].clientX, y: e.touches[0].clientY }; imgClamp(); imgApply();
     } else if (e.touches.length === 2) {

@@ -57,22 +57,29 @@ function previewRelease() {
 }
 
 function enqueuePreview(file) {
-  if (!file || file.kind !== 'source') return Promise.resolve(null);
+  if (!file || (file.kind !== 'source' && file.kind !== 'image')) return Promise.resolve(null);
   if (previewJobs.has(file.id)) return previewJobs.get(file.id);
   const job = (async () => {
     try {
       if (globals.get('preview_enabled') === false) return null;
       await previewAcquire();
       try {
-        const buf = await storage.readBuffer(file.storedName);
-        const ext = path.extname(file.originalName || file.storedName || '').toLowerCase();
-        const pv = await preview.generatePreview(ext, file.mime, buf);
+        const buf = await storage.readBuffer(file.storedName || file.stored_name);
+        const ext = path.extname(file.originalName || file.original_name || file.storedName || file.stored_name || '').toLowerCase();
+        // source → 完整栅格化预览（PNG）；超大 image → 降采样预览（JPEG，长边 4096，
+        // 避开移动端 GPU 纹理上限，否则大图显示一半/大片空白）
+        // 注意：getFile 返回蛇形列名（stored_name），上传路径构造的是驼峰（storedName），两者都兼容
+        const isImg = file.kind === 'image';
+        const pv = isImg
+          ? await preview.generateImageDownscale(ext, buf, 4096)
+          : await preview.generatePreview(ext, file.mime, buf);
         if (pv.ok) {
-          const pvName = uuid() + '_preview.png';
-          await storage.save(pvName, pv.buffer, 'image/png');
+          const pvName = uuid() + (isImg ? '_preview.jpg' : '_preview.png');
+          await storage.save(pvName, pv.buffer, isImg ? 'image/jpeg' : 'image/png');
           await db.run('UPDATE files SET preview_path=? WHERE id=?', [pvName, file.id]);
           return pvName;
         }
+        if (isImg) console.warn('[preview] 图片降采样失败：', pv.reason);
       } finally {
         previewRelease();
       }
@@ -95,8 +102,9 @@ function enqueueSlidePdf(file) {
     try {
       await previewAcquire();
       try {
-        const buf = await storage.readBuffer(file.storedName);
-        const ext = path.extname(file.originalName || file.storedName || '').toLowerCase();
+        // 同 enqueuePreview：兼容 getFile 的蛇形列名与上传路径的驼峰命名
+        const buf = await storage.readBuffer(file.storedName || file.stored_name);
+        const ext = path.extname(file.originalName || file.original_name || file.storedName || file.stored_name || '').toLowerCase();
         const pv = await preview.generateSlidePdf(ext, buf);
         if (pv.ok) {
           const pvName = uuid() + '_slide.pdf';
@@ -1220,18 +1228,23 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
         return res.end(data);
       }
-      // 源文件预览尚未生成：首次访问时按需生成（后台任务未完成则在此等待其完成，避免重复转换）
-      if (file.kind === 'source') {
+      // 预览尚未生成：首次访问时按需生成（后台任务未完成则在此等待其完成，避免重复转换）。
+      // source=栅格化预览；image 仅在前端检测到超大尺寸（移动端纹理上限）且显式带 gen=1 时才生成，
+      // 否则探针请求会给每张普通图都做一次无谓降采样。
+      if (file.kind === 'source' || (file.kind === 'image' && u.searchParams.get('gen') === '1')) {
         let pvPath = null;
         try { pvPath = await enqueuePreview(file); } catch (e) { pvPath = null; }
         if (pvPath) {
           if (storage.cosEnabled) {
-            const signed = await storage.getSignedUrl(pvPath, { contentType: 'image/png' });
+            const signed = await storage.getSignedUrl(pvPath, {
+              contentType: /\.jpe?g$/i.test(pvPath) ? 'image/jpeg' : 'image/png'
+            });
             res.writeHead(302, { 'Location': signed, 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' });
             return res.end('Redirecting to COS...');
           }
           const data = await storage.readBuffer(pvPath);
-          res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+          const isJpg = /\.jpe?g$/i.test(pvPath);
+          res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
           return res.end(data);
         }
       }

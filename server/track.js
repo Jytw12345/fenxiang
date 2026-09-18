@@ -42,16 +42,39 @@ function isPrivateIp(ip) {
   return false;
 }
 
-// ---------- IP 地理（异步，失败降级，不阻塞主流程） ----------
+// ---------- IP 地理（ip2region 离线中文库：国内精确到市/运营商，毫秒级零网络依赖） ----------
+// 失败时降级到 ipwho.is 在线查询；再失败为空。不阻塞主流程。
+let _ip2r = null;
+function getIp2r() {
+  if (_ip2r !== null) return _ip2r;
+  try {
+    const mod = require('ip2region');
+    _ip2r = new (mod.default || mod)();
+  } catch (e) { _ip2r = false; }
+  return _ip2r;
+}
 async function geoIp(ip) {
   const none = { country: '', region: '', city: '' };
   if (!ip || isPrivateIp(ip)) return { country: '内网/局域网', region: '', city: '' };
+  const r = getIp2r();
+  if (r) {
+    try {
+      const d = r.search(ip);
+      if (d && d.country) {
+        return {
+          country: d.country,
+          region: [d.province, d.city].filter(Boolean).join('·'),
+          city: d.isp || ''
+        };
+      }
+    } catch (e) { /* 落到在线查询 */ }
+  }
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 1200);
-    const r = await fetch('https://ipwho.is/' + encodeURIComponent(ip), { signal: ctrl.signal });
+    const r2 = await fetch('https://ipwho.is/' + encodeURIComponent(ip), { signal: ctrl.signal });
     clearTimeout(timer);
-    const j = await r.json();
+    const j = await r2.json();
     if (j && j.success && (j.country || j.city)) {
       return { country: j.country || '', region: j.region || '', city: j.city || '' };
     }
