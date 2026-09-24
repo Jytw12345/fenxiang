@@ -426,6 +426,11 @@ async function orphanFiles() {
 }
 async function deleteFileRow(id) { await drv.run('DELETE FROM files WHERE id=?', [id]); }
 async function deleteShareRow(id) { await drv.run('DELETE FROM shares WHERE id=?', [id]); }
+// 过期自动清理：列出 expires_at 早于 beforeTs 的分享（永久分享 expires_at IS NULL 不参与）。
+// 返回完整行，供 deleteShareDeep 使用（依赖 id / file_id）。
+async function listExpiredShares(beforeTs) {
+  return drv.all(`SELECT s.* FROM shares s WHERE s.expires_at IS NOT NULL AND s.expires_at < ?`, [beforeTs]);
+}
 
 // ---------- 操作审计日志 ----------
 async function recordAudit(actorId, action, target, detail) {
@@ -510,7 +515,7 @@ module.exports = {
   // files
   createFile, getFile, replaceFileById, renameFileById, listSharesByFile, countSharesByFile, listFilesForUser, listAllFiles,
   // shares
-  createShare, getShare, getShareMeta, setShareStatus, updateShareSettings,
+  createShare, getShare, getShareMeta, setShareStatus, updateShareSettings, listExpiredShares,
   // access control / approvals
   countOpens, distinctViewers, getApproval, touchApproval, upsertApproval,
   // sessions / logs

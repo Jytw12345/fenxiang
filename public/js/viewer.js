@@ -401,8 +401,13 @@ async function loadSourcePreview() {
     // 仅 404（无可用预览图）才降级为源文件下载提示。
     // 不再预载整个源文件：PSD/AI 动辄几百 MB，白耗流量；点下载时由 saveDoc 按需拉取
     if (r.status === 404) {
+      let detail = '可能原因：①服务器未安装转换后端；②该文件上传于启用预览之前。重新上传即可生成预览。';
+      try {
+        const j = await r.json();
+        if (j && j.message) detail = j.message; // 后端已给出具体原因（如「预览功能已关闭」）
+      } catch (e) { /* 响应体非 JSON 时保留默认文案 */ }
       $('#dlWrap').style.display = 'block';
-      $('#dlWrap').innerHTML = '<p>这是设计源文件（PSD / AI / CDR 等），当前暂无在线预览图。</p><p class="sub">可能原因：①服务器未安装转换后端；②该文件上传于启用预览之前。重新上传即可生成预览。</p>';
+      $('#dlWrap').innerHTML = '<p>这是设计源文件（PSD / AI / CDR 等），当前暂无在线预览图。</p><p class="sub">' + escapeHtml(detail) + '</p>';
       return;
     }
     // 其他错误（403 会话失效 / 500 等）→ 失败提示，勿误导用户下载错误内容

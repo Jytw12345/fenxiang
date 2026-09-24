@@ -237,4 +237,4 @@ async function generateImageDownscale(ext, buf, maxSide) {
   }
 }
 
-module.exports = { generatePreview, generateSlidePdf, generateImageDownscale, SOURCE_EXTS };
+module.exports = { generatePreview, generateSlidePdf, generateImageDownscale, SOURCE_EXTS, detectPython, detectTools };

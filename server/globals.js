@@ -27,6 +27,10 @@ const REGISTRY = [
   { key: 'preview_timeout_ms', env: 'PREVIEW_TIMEOUT_MS', type: 'int', group: '预览与处理', label: '预览转换超时（毫秒）',
     default: 60000, help: '单个文件预览转换超时，超时降级为仅下载。' },
 
+  // —— 保留与清理 ——
+  { key: 'expired_share_retention_days', env: 'EXPIRED_SHARE_RETENTION_DAYS', type: 'int', group: '保留与清理', label: '过期分享保留天数（自动清理）',
+    default: 30, help: '分享到期后保留多少天，超过后由每日定时任务自动彻底删除该分享，并级联删除未被其他分享引用的源文件。设为 0 关闭自动清理。' },
+
   // —— 防盗用默认策略（新建分享时的全局默认，创建时可覆盖） ——
   { key: 'default_watermark_mode', env: '', type: 'enum', options: ['none', 'static', 'dynamic'], group: '防盗用默认策略',
     label: '默认水印模式', default: 'none', help: '新建分享默认采用的水印模式（none / static / dynamic）。' },

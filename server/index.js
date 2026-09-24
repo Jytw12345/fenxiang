@@ -43,6 +43,9 @@ function classifyKind(ext, mime) {
 // 上传/替换时不阻塞等待预览转换（PSD/AI/CDR 等依赖 Python/外部工具，可能很慢），
 // 改为后台任务生成；首个访客请求 /api/preview/ 时若尚未生成，则在此等待其完成（按需生成，去重避免重复转换）。
 const previewJobs = new Map(); // fileId -> Promise（正在生成的预览任务，去重用）
+// 记录最近一次预览生成失败原因（fileId -> { reason, at }），供 /api/preview 在降级时回传给前端，
+// 避免前端一律显示「服务器未安装转换后端」的误导文案（实际可能是「预览功能已关闭」或「格式不支持」）。
+const previewFailReason = new Map();
 // 并发信号量：源文件预览生成会起 python 子进程，大量文件同时上传时限制并发，避免打满 CPU/内存
 const PREVIEW_MAX_CONCURRENCY = 4;
 const previewSem = { n: PREVIEW_MAX_CONCURRENCY, waiters: [] };
@@ -74,6 +77,15 @@ function enqueuePreview(file) {
         const pv = isImg
           ? await preview.generateImageDownscale(ext, buf, 4096)
           : await preview.generatePreview(ext, file.mime, buf);
+        // 诊断：记录失败原因（含生效的预览开关状态），部署后 docker compose logs 即可直接看到卡点
+        if (!pv || !pv.ok) {
+          const reason = (pv && pv.reason) || 'unknown';
+          console.warn('[preview] 生成预览失败 file=%s ext=%s kind=%s reason=%s ' +
+            '(globals.preview_enabled=%s config.PREVIEW_ENABLED=%s hasPython=%s)',
+            file.id, ext, file.kind, reason,
+            globals.get('preview_enabled'), config.PREVIEW_ENABLED, !!preview.detectPython());
+          previewFailReason.set(file.id, { reason, at: Date.now() });
+        }
         if (pv.ok) {
           // 竞态守卫：转换期间文件可能已被 replace 路由替换（stored_name 变化），
           // 此时该预览对应的是旧文件内容，直接丢弃，避免旧预览回写覆盖新文件
@@ -421,6 +433,24 @@ async function deleteShareDeep(share) {
     }
   }
   return fileDeleted;
+}
+// 定时清理：到期超过保留期的分享自动彻底删除（含未被其他分享引用的源文件）。
+// 保留期由全局参数 expired_share_retention_days 控制（默认 30 天），0 表示关闭。
+// 仅处理设了过期时间的分享；永久分享（expires_at IS NULL）永不被此任务清理。
+async function autoCleanupExpiredShares() {
+  const days = Number(globals.get('expired_share_retention_days')) || 0;
+  if (days <= 0) return;
+  const beforeTs = Date.now() - days * 24 * 3600 * 1000;
+  const expired = await db.listExpiredShares(beforeTs);
+  if (!expired.length) return;
+  let sharesDeleted = 0, filesDeleted = 0;
+  for (const sh of expired) {
+    const fd = await deleteShareDeep(sh);
+    if (fd) filesDeleted++;
+    sharesDeleted++;
+  }
+  await db.recordAudit('system', 'auto_cleanup_expired', 'shares', `shares=${sharesDeleted};files=${filesDeleted};retentionDays=${days}`);
+  console.log(`[cleanup] 自动清理过期分享：删除 ${sharesDeleted} 个分享，级联删除 ${filesDeleted} 个源文件（保留期 ${days} 天）`);
 }
 // 解析新用户应归属的门店与角色。
 // 门店(org)由超级管理员在后台统一创建与分配；普通注册仅能凭有效邀请码加入指定门店，
@@ -1348,7 +1378,16 @@ const server = http.createServer(async (req, res) => {
           return res.end(data);
         }
       }
-      return sendJson(res, 404, { error: 'no_preview', message: '该文件无可用预览' });
+      // 降级：把真实失败原因回传给前端（区分「预览已关闭 / 组件缺失 / 格式不支持 / 转换失败」），
+      // 不再笼统提示「服务器未安装转换后端」。
+      const fr = previewFailReason.get(share.file_id);
+      const reason = fr && fr.reason;
+      let message = '该文件无可用预览';
+      if (reason === 'disabled') message = '在线预览功能已在管理后台关闭（设置 → 全局参数 → 启用在线预览）';
+      else if (reason === 'no_python' || reason === 'no_backend_or_failed') message = '服务器未安装源文件转换组件（PSD 预览需要 Python + psd_tools）';
+      else if (reason === 'unsupported_ext') message = '该格式暂不支持在线预览，请下载查看';
+      else if (reason === 'timeout') message = '源文件转换超时，请稍后重试或下载查看';
+      return sendJson(res, 404, { error: 'no_preview', message, reason: reason || 'unknown' });
     }
 
     // PPT 幻灯片：下发 LibreOffice 转换出的 PDF（需有效会话，与 /api/content 同等鉴权）。
@@ -1866,6 +1905,9 @@ db.init()
     // 心跳/进度事件写入量最大（默认 15 秒一条），不清理表会无限膨胀拖慢所有查询。
     try { await db.deleteOldLogs(30); } catch (e) { console.error('[logs] 启动清理失败:', e.message); }
     setInterval(() => { db.deleteOldLogs(30).catch(e => console.error('[logs] 定时清理失败:', e.message)); }, 24 * 3600 * 1000);
+    // 过期分享自动清理（保留期由全局参数 expired_share_retention_days 控制，默认 30 天）
+    try { await autoCleanupExpiredShares(); } catch (e) { console.error('[cleanup] 启动清理过期分享失败:', e.message); }
+    setInterval(() => { autoCleanupExpiredShares().catch(e => console.error('[cleanup] 定时清理过期分享失败:', e.message)); }, 24 * 3600 * 1000);
     server.listen(PORT, () => {
       console.log(`安阅服务已启动: http://localhost:${PORT}（数据库：${db.driverType()}）`);
     });
