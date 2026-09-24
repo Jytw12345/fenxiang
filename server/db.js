@@ -238,7 +238,7 @@ async function getShare(id) {
   return drv.get('SELECT * FROM shares WHERE id=?', [id]) || null;
 }
 async function getShareMeta(id) {
-  return drv.get(`SELECT s.id,s.name,s.kind,s.status,s.max_viewers,s.max_views,s.duration_sec,s.expires_at,s.access_code,s.auth_mode,s.watermark,s.disable_copy,s.disable_print,s.disable_download,s.disable_screenshot,s.extra,
+  return drv.get(`SELECT s.id,s.name,s.kind,s.status,s.max_viewers,s.max_views,s.duration_sec,s.expires_at,s.access_code,s.auth_mode,s.watermark,s.disable_copy,s.disable_print,s.disable_download,s.disable_screenshot,s.extra,s.owner_id,
       f.preview_path
     FROM shares s LEFT JOIN files f ON s.file_id=f.id WHERE s.id=?`, [id]) || null;
 }
@@ -322,15 +322,20 @@ async function getShareViewers(shareId) {
       MIN(created_at) AS first_at, MAX(created_at) AS last_at,
       COUNT(*) AS events,
       SUM(CASE WHEN event='open' THEN 1 ELSE 0 END) AS opens,
-      MAX(progress) AS last_progress,
       MAX(device) AS device, MAX(os) AS os, MAX(browser) AS browser,
       MAX(country) AS country, MAX(region) AS region, MAX(city) AS city, MAX(ip) AS ip
     FROM logs WHERE share_id=? GROUP BY viewer_token ORDER BY last_at DESC`, [shareId]);
   // 阅读时长：按事件时间排序，相邻间隔累加；单次间隔超过 GAP_CAP 视为离开/空闲，不再计入
   const GAP_CAP = 5 * 60 * 1000;
-  const evs = await drv.all('SELECT viewer_token, created_at FROM logs WHERE share_id=? ORDER BY created_at ASC', [shareId]);
+  // 最后进度：不能在 SQL 里 MAX(progress)（字符串比较，p2 会被误判小于 p10），
+  // 改为应用层取每个 viewer 时间线上最后一条非空 progress（progress 按时间递增上报）
+  const evs = await drv.all('SELECT viewer_token, created_at, progress FROM logs WHERE share_id=? ORDER BY created_at ASC', [shareId]);
   const byViewer = {};
-  for (const e of evs) { (byViewer[e.viewer_token] || (byViewer[e.viewer_token] = [])).push(Number(e.created_at)); }
+  const lastProg = {};
+  for (const e of evs) {
+    (byViewer[e.viewer_token] || (byViewer[e.viewer_token] = [])).push(Number(e.created_at));
+    if (e.progress !== null && e.progress !== undefined && String(e.progress) !== '') lastProg[e.viewer_token] = String(e.progress);
+  }
   return rows.map(r => {
     const times = byViewer[r.viewer_token] || [];
     let dur = 0;
@@ -339,7 +344,7 @@ async function getShareViewers(shareId) {
       viewerToken: r.viewer_token,
       firstAt: Number(r.first_at), lastAt: Number(r.last_at),
       events: Number(r.events), opens: Number(r.opens),
-      lastProgress: r.last_progress || '',
+      lastProgress: lastProg[r.viewer_token] || '',
       device: r.device || '未知', os: r.os || '未知', browser: r.browser || '未知',
       country: r.country || '', region: r.region || '', city: r.city || '',
       ip: r.ip || '',
@@ -434,6 +439,10 @@ async function listAudit(limit = 200) {
     LEFT JOIN users u ON u.id = a.actor_id
     ORDER BY a.created_at DESC LIMIT ?`, [limit]);
 }
+// 清理 N 天前的访问日志（心跳/进度事件占大头，不清理表会无限膨胀拖慢整体查询）
+async function deleteOldLogs(days) {
+  await drv.run('DELETE FROM logs WHERE created_at < ?', [Date.now() - days * 86400000]);
+}
 
 // ---------- 数据概览（超管全局 / 普通用户仅本人）----------
 async function dashboardTotals(ownerId, isSuper) {
@@ -511,7 +520,7 @@ module.exports = {
   // super admin
   listAllShares, listAllUsers, setUserDisabled, setUserRole, setUserSuper,
   updateUserPassword, updateUserProfile, revokeOtherTokens,
-  getUserByEmail, deleteUser, statsStorage, orphanFiles, deleteFileRow, deleteShareRow, recordAudit, listAudit,
+  getUserByEmail, deleteUser, statsStorage, orphanFiles, deleteFileRow, deleteShareRow, recordAudit, listAudit, deleteOldLogs,
   dashboardTotals, dashboardTopShares, dashboardRecentViewers,
   // 全局参数
   getGlobalSetting, getGlobalSettings, setGlobalSetting,

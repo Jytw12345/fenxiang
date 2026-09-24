@@ -4,6 +4,29 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>安阅 · 文件预览</title>
+<script>
+/* 启动兜底：任何脚本顶层异常 / 未处理的 Promise 拒绝，都不应让页面无声地卡在"正在准备…"。
+   必须放在所有外部脚本之前注册，否则 viewer.js 顶层抛错时监听器还没挂上。
+   只在闸门仍停留在初始文案时接管，正常流程不受影响。 */
+(function () {
+  function fail(title, msg) {
+    var t = document.getElementById('gateTitle');
+    if (!t || t.textContent.indexOf('正在准备') < 0) return;
+    var ic = document.getElementById('gateIcon'); if (ic) ic.textContent = '⚠️';
+    t.textContent = title;
+    var b = document.getElementById('gateBody');
+    if (b) b.innerHTML = '<p class="sub" style="text-align:center">' + msg +
+      '<br><span style="font-size:12px;color:#9aa3b2">请把此提示截图反馈</span></p>';
+  }
+  window.addEventListener('error', function (e) {
+    fail('页面初始化失败', (e && e.message) ? e.message : '脚本异常');
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    fail('无法打开', (r && (r.message || r)) ? String(r.message || r) : '网络请求失败');
+  });
+})();
+</script>
 <link rel="stylesheet" href="/style.css" />
 <style>
   #viewer { max-width: 900px; margin: 0 auto; padding: 18px; }
@@ -50,6 +73,9 @@
   .img-loading .spin{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:imgSpin 1s linear infinite;}
   @keyframes imgSpin{to{transform:rotate(360deg)}}
   .img-loading.err .ltxt{color:var(--danger);}
+  /* 文档级加载层：PDF 下载/解析、docx 拉取期间盖住内容区（复用 imgSpin 动画） */
+  .doc-loading{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted);font-size:13px;background:rgba(255,255,255,.88);z-index:30;pointer-events:none;}
+  .doc-loading .spin{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:imgSpin 1s linear infinite;}
   #imgStage .zcontent{transform-origin:0 0;will-change:transform;}
   #imgStage img{max-width:none;}
   .zbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:4px;background:#1f2430ee;color:#fff;padding:6px 8px;border-radius:999px;box-shadow:0 6px 24px rgba(0,0,0,.28);user-select:none;-webkit-user-select:none;}
@@ -117,6 +143,10 @@
 
   /* ===== PDF 页面容器（wrapper 承载高亮层） ===== */
   .pg{position:relative;line-height:0;}
+  /* 占位页骨架：未渲染（或像素被回收）时显示流光动画，canvas 渲染完成后加 .done 隐藏 */
+  .pg::after{content:'';position:absolute;inset:0;z-index:1;border-radius:2px;background:linear-gradient(100deg,#f0f2f6 40%,#e7ebf1 50%,#f0f2f6 60%);background-size:200% 100%;animation:pgShimmer 1.2s linear infinite;}
+  .pg.done::after{display:none;}
+  @keyframes pgShimmer{to{background-position:-200% 0}}
   .pg canvas{box-shadow:0 2px 10px rgba(0,0,0,.12);background:#fff;display:block;}
   .pg-hl{position:absolute;inset:0;pointer-events:none;overflow:hidden;}
   .pg-hl i{position:absolute;background:rgba(250,199,85,.45);border-radius:2px;}
@@ -136,6 +166,20 @@
   body.present #prBar{transform:none;}
   #prBar button{background:transparent;border:1px solid rgba(255,255,255,.32);color:#fff;border-radius:8px;padding:6px 12px;font-size:13px;font-family:inherit;cursor:pointer;}
   #prBar button:hover{background:rgba(255,255,255,.14);}
+
+  /* ===== 白标（自定义品牌） ===== */
+  .wb-brand{display:none;align-items:center;gap:7px;flex:0 0 auto;font-weight:800;font-size:15px;color:var(--brand);white-space:nowrap;min-width:0;}
+  .wb-brand .wb-logo{height:22px;width:22px;object-fit:contain;border-radius:6px;display:none;flex:0 0 auto;}
+  .wb-brand .wb-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .wb-foot{margin-top:22px;padding-top:14px;border-top:1px solid var(--line);text-align:center;font-size:12px;color:var(--muted);}
+  .wb-foot b{color:var(--brand);font-weight:700;}
+  /* 主题色穿透：让品牌色同时作用于阅读器主操作（默认仅 .btn 渐变走 var(--brand)，此处补齐） */
+  #viewer .btn{background:linear-gradient(135deg,var(--brand),var(--brand-l));border:none;color:#fff;}
+  #viewer .btn:hover{background:linear-gradient(135deg,var(--brand-d),var(--brand-l));}
+  /* 补齐内联样式里写死的浅蓝高亮底（.vic.on / .vbtn.on / .ms-b.on），使其跟随品牌色 */
+  .vic.on{background:var(--brand-xl)!important;}
+  .vbtn.on{background:var(--brand-xl)!important;}
+  .ms-b.on{background:var(--brand-xl)!important;}
 </style>
 </head>
 <body>
@@ -148,6 +192,10 @@
         <button class="vic" id="thumbBtn" title="缩略图" aria-label="缩略图" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
         </button>
+        <div class="wb-brand" id="wbBrand" style="display:none">
+          <img class="wb-logo" id="wbLogo" alt="" />
+          <span class="wb-name" id="wbName">安阅</span>
+        </div>
         <div class="brand" id="docName">安阅</div>
       </div>
       <div class="tb-right">
@@ -164,7 +212,7 @@
         <input id="vPageIn" inputmode="numeric" aria-label="跳转到页码" />
         <span id="vPageTotal">/ 1</span>
       </div>
-      <button class="vbtn" id="vRotate" data-for="pdf,image" title="旋转 90°" aria-label="旋转">
+      <button class="vbtn" id="vRotate" data-for="pdf" title="旋转 90°" aria-label="旋转">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3.5V8h-4.5"/></svg>
       </button>
       <button class="vbtn" id="vMore" title="阅读设置" aria-label="更多">
@@ -206,6 +254,8 @@
     </div>
     <div id="dlWrap" class="dl" style="display:none"></div>
   </div>
+
+  <div id="wbFoot" class="wb-foot" style="display:none">由 <b>安阅</b> 提供安全预览</div>
 </div>
 
 <div class="pr-hot l" id="prHotL" title="上一页"></div>

@@ -5,7 +5,15 @@ const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add
 const params = new URLSearchParams(location.search);
 const shareId = params.get('share');
 let viewerToken = localStorage.getItem('viewerToken');
-if (!viewerToken) { viewerToken = crypto.randomUUID(); localStorage.setItem('viewerToken', viewerToken); }
+// 兼容非安全上下文：crypto.randomUUID 只在安全上下文（HTTPS 真证书 / localhost）可用。
+// 用 http://IP 或自签证书（浏览器显示"不安全"）访问时它是 undefined，直接调用会抛异常，
+// 且该异常发生在脚本顶层 → 整个 viewer.js 中断，表现为闸门永远停在"正在准备…"、连 /api 请求都不发。
+if (!viewerToken) {
+  viewerToken = (window.crypto && typeof crypto.randomUUID === 'function')
+    ? crypto.randomUUID()
+    : 'v-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  localStorage.setItem('viewerToken', viewerToken);
+}
 
 // 防嵌套：禁止被其它网站以 iframe 方式嵌入盗用。同源嵌入（如后台预览）不受影响。
 // 浏览器 X-Frame-Options 已兜底拦截跨域嵌入；此处为防御纵深，跨域读取顶层来源会抛错 → 判定为非法嵌入。
@@ -25,6 +33,23 @@ let accessToken = null, restrictions = {}, wm = null, kind = '', docName = '', e
 let downloadUrl = null;   // 受保护下载用的 blob URL（仅允许下载的文件类型会生成）
 
 function shortId() { return viewerToken.slice(0, 8); }
+
+// 复制到剪贴板：navigator.clipboard 同样只在安全上下文可用（http://IP、自签证书下为 undefined），
+// 缺失时回退到 textarea + execCommand，保证"复制页面链接"在任何访问方式下都可用。
+function copyText(t) {
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = t; ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      ok ? resolve() : reject(new Error('execCommand copy failed'));
+    } catch (e) { reject(e); }
+  });
+}
 
 // ---------- 水印 ----------
 // 后端下发 watermark 可能是 null / 旧版纯字符串 / 新模型对象 {mode,text,dl}
@@ -49,21 +74,78 @@ function buildWatermark() {
   if (wm.mode === 'dynamic') startDynamicWatermark();
 }
 // 动态水印：实时刷新访客ID + 时间，泄露后可溯源
+let wmTimer = null;
 function startDynamicWatermark() {
   const wmEl = $('#wm');
-  setInterval(() => {
+  if (wmTimer) clearInterval(wmTimer);
+  wmTimer = setInterval(() => {
     const t = new Date().toTimeString().slice(0, 8);
     wmEl.querySelectorAll('span').forEach(s => { s.textContent = wmBaseText() + '  ' + shortId() + '  ' + t; });
   }, 1000);
 }
 // 动态水印 / 防截图：让水印层缓慢漂移，提升截图留存难度
+let moveTimer = null;
 function startMovingWatermark() {
   const wmEl = $('#wm'); let t = 0;
-  setInterval(() => { t = (t + 1) % 40; wmEl.style.transform = `translate(${t}px, ${t}px)`; }, 120);
+  if (moveTimer) clearInterval(moveTimer);
+  moveTimer = setInterval(() => { t = (t + 1) % 40; wmEl.style.transform = `translate(${t}px, ${t}px)`; }, 120);
 }
 
 // ---------- 限制操作 ----------
 let restrictionsApplied = false;
+let brandName = '';   // 白标品牌名（用于闸门标题 / 文档标题）
+
+// 十六进制色阶调整：pct<0 变暗，pct>0 变亮，返回 #rrggbb
+function shadeHex(hex, pct) {
+  hex = (hex || '').replace('#', '');
+  if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return hex;
+  let r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+  if (pct < 0) { const f = 1 + pct; r = Math.round(r * f); g = Math.round(g * f); b = Math.round(b * f); }
+  else { r = Math.round(r + (255 - r) * pct); g = Math.round(g + (255 - g) * pct); b = Math.round(b + (255 - b) * pct); }
+  const h = x => Math.max(0, Math.min(255, x)).toString(16).padStart(2, '0');
+  return '#' + h(r) + h(g) + h(b);
+}
+
+// 白标（自定义品牌）渲染：应用主题色、显示品牌、页脚、文档标题
+function applyBrand(brand) {
+  if (!brand || typeof brand !== 'object') return;
+  const root = document.documentElement;
+  if (brand.color && /^#?[0-9a-fA-F]{6}$/.test(brand.color)) {
+    const hex = brand.color[0] === '#' ? brand.color : '#' + brand.color;
+    root.style.setProperty('--brand', hex);
+    root.style.setProperty('--brand-d', shadeHex(hex, -0.16));
+    root.style.setProperty('--brand-l', shadeHex(hex, 0.42));
+    root.style.setProperty('--brand-xl', shadeHex(hex, 0.86));
+  }
+  const name = (brand.name || '').trim();
+  const logo = (brand.logo || '').trim();
+  const wb = document.getElementById('wbBrand');
+  if (wb && (name || logo)) {
+    wb.style.display = 'flex';
+    const nm = document.getElementById('wbName');
+    if (nm) nm.textContent = name || '安阅';
+    const lg = document.getElementById('wbLogo');
+    if (lg) {
+      if (logo) {
+        lg.src = logo; lg.style.display = 'block';
+        lg.onerror = () => { lg.style.display = 'none'; };
+      } else { lg.style.display = 'none'; }
+    }
+    brandName = name || '安阅';
+  }
+  // 页脚：仅当白标激活或明确请求隐藏时才介入，避免给旧分享凭空加页脚
+  const foot = document.getElementById('wbFoot');
+  if (foot) {
+    const active = !!(name || logo || brand.hidePowered);
+    if (active) {
+      foot.style.display = 'block';
+      foot.innerHTML = '由 <b>' + escapeHtml(brandName || '安阅') + '</b> 提供安全预览';
+      if (brand.hidePowered) foot.style.display = 'none';
+    }
+  }
+  if (brandName) document.title = brandName + ' · 文件预览';
+}
 function isField(el) { return el && el.tagName && /^(INPUT|TEXTAREA)$/.test(el.tagName); }
 function applyRestrictions() {
   if (restrictionsApplied) return;   // enterContent 可能被多次调用，避免监听器叠加
@@ -111,7 +193,7 @@ function viewerCtxItems() {
   if (restrictions.download) items.push({ label: '禁止下载', disabled: true });
   else items.push({ label: '下载文件', onClick: saveDoc });
   if (restrictions.copy) items.push({ label: '禁止复制', disabled: true });
-  else items.push({ label: '复制页面链接', onClick: () => { navigator.clipboard.writeText(location.href); toast('已复制链接'); } });
+  else items.push({ label: '复制页面链接', onClick: () => { copyText(location.href).then(() => toast('已复制链接')).catch(() => toast('复制失败，请手动复制地址栏')); } });
   if (restrictions.print) items.push({ label: '禁止打印', disabled: true });
   else items.push({ label: '打印', onClick: () => window.print() });
   return items;
@@ -122,6 +204,7 @@ let lastPage = 0;
 function report(event, progress) {
   if (!accessToken) return;
   fetch('/api/log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    keepalive: true,   // beforeunload 关页时也要能把 close 事件送出去
     body: JSON.stringify({ shareId, viewerToken, accessToken, event, progress }) }).catch(() => {});
 }
 window.addEventListener('beforeunload', () => report('close'));
@@ -159,14 +242,40 @@ function timeout() {
 // ---------- 访问流程 ----------
 function showGate(html) { $('#gateBody').innerHTML = html; $('#gate').style.display = 'block'; }
 
+// 文档级加载提示：PDF 解析/下载、docx 拉取期间盖在内容区上，避免"一片空白像打不开"。
+// 独立于 #pages（会被 innerHTML 清空），挂在 body 上；pointer-events:none 不挡操作。
+let docLoadingEl = null;
+function showDocLoading(text) {
+  hideDocLoading();
+  docLoadingEl = document.createElement('div');
+  docLoadingEl.className = 'doc-loading';
+  const sp = document.createElement('div'); sp.className = 'spin';
+  const tx = document.createElement('div'); tx.className = 'ltxt'; tx.textContent = text || '正在加载…';
+  docLoadingEl.appendChild(sp); docLoadingEl.appendChild(tx);
+  document.body.appendChild(docLoadingEl);
+}
+function updateDocLoading(text) { if (docLoadingEl) { const t = docLoadingEl.querySelector('.ltxt'); if (t) t.textContent = text; } }
+function hideDocLoading() { if (docLoadingEl) { docLoadingEl.remove(); docLoadingEl = null; } }
+
 async function loadMeta() {
-  const r = await fetch('/api/share/' + shareId);
-  const m = await r.json();
+  let r, m;
+  try {
+    r = await fetch('/api/share/' + shareId);
+    m = await r.json();
+  } catch (e) {
+    // 网络层失败 / 服务端返回非 JSON（500 报错页）都会走到这里。
+    // 以前这里没有 try/catch，异常冒泡后闸门会永远停在"正在准备…"，无从判断。
+    $('#gateIcon').textContent = '⚠️';
+    $('#gateTitle').textContent = '无法打开';
+    showGate('<p class="sub" style="text-align:center">分享信息加载失败，请稍后重试或联系分享者。</p>');
+    return false;
+  }
   if (!r.ok) { $('#gateTitle').textContent = '无法打开'; showGate('<p class="sub" style="text-align:center">' + (m.error || '链接无效') + '</p>'); return false; }
   if (m.status !== 'active') { $('#gateTitle').textContent = '文档已下架'; showGate('<p class="sub" style="text-align:center">该文档已被分享者销毁或下架。</p>'); return false; }
   docName = m.name; kind = m.kind; restrictions = m.restrictions; wm = parseWm(m.watermark); hasPreview = !!m.preview;
   previewPages = (m.extra && Number(m.extra.previewPages) > 0) ? Number(m.extra.previewPages) : 0;
   needProtect = !!(m.extra && m.extra.needProtect);
+  if (m.extra && m.extra.brand) applyBrand(m.extra.brand);
   $('#docName').textContent = docName;
   // 方案 B：平时不显示「禁止复制/打印/下载/截图」等限制标签（避免客户感觉被防着）；
   // 仅在客户真正触发对应操作时（applyRestrictions / 下载按钮）弹 toast 提示。
@@ -199,61 +308,77 @@ async function enterContent(res) {
   startHeartbeat();
 }
 
+let accessInFlight = false;
 async function requestAccess(code) {
-  const r = await fetch('/api/access', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ shareId, viewerToken, code }) });
-  const res = await r.json();
-  if (res.error === 'link_bound') {
-    showGate('<p class="sub" style="text-align:center">' + (res.message || '该链接已绑定首次打开的设备，无法转发给他人使用。') + '</p>');
-    return;
-  }
-  if (res.needCode) {
-    showGate('<label class="field">请输入访问码</label><input id="codeInput" placeholder="访问码"/><button class="btn" style="width:100%;margin-top:10px" id="codeOk">确认</button>');
-    $('#codeOk').onclick = () => requestAccess($('#codeInput').value.trim());
-    return;
-  }
-  if (res.needApproval) {
-    showGate('<p class="sub" style="text-align:center">已向分享者发送访问申请，<br/>请等待对方授权后刷新本页。</p>');
-    return;
-  }
-  if (res.needWechat) {
-    showGate('<p class="sub" style="text-align:center;margin-bottom:10px">该文档需微信扫码验证</p>' +
-      '<div id="wxBox" style="text-align:center">' +
-      '<iframe id="wxFrame" style="width:240px;height:300px;border:0;margin:0 auto;display:none"></iframe>' +
-      '<img id="wxQr" class="qr" style="margin:0 auto;width:180px;height:180px;display:none"/>' +
-      '<p class="sub" id="wxHint">正在生成二维码…</p>' +
-      '<button class="btn sm" id="wxSim" style="display:none">模拟扫码确认</button></div>');
-    (async () => {
-      try {
-        const r = await fetch('/api/wechat/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purpose: 'verify', share: shareId, viewerToken }) });
-        const d = await r.json();
-        if (!r.ok) { $('#wxHint').textContent = '微信验证启动失败'; return; }
-        if (d.mode === 'real') { $('#wxFrame').src = d.qrUrl; $('#wxFrame').style.display = 'block'; $('#wxHint').style.display = 'none'; }
-        else { $('#wxQr').src = d.qr; $('#wxQr').style.display = 'block'; $('#wxHint').style.display = 'none'; $('#wxSim').style.display = 'inline-block'; }
-        let timer = setInterval(async () => {
-          try {
-            const c = await (await fetch('/api/wechat/check?state=' + d.state)).json();
-            if (c.ok && c.verified) {
+  // 防抖：连点/回车重复提交会产生重复访问会话（虚增次数，甚至触发 max_views 锁死）
+  if (accessInFlight) return;
+  accessInFlight = true;
+  try {
+    const r = await fetch('/api/access', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shareId, viewerToken, code }) });
+    const res = await r.json();
+    if (res.error === 'link_bound') {
+      showGate('<p class="sub" style="text-align:center">' + (res.message || '该链接已绑定首次打开的设备，无法转发给他人使用。') + '</p>');
+      return;
+    }
+    if (res.needCode) {
+      showGate('<label class="field">请输入访问码</label><input id="codeInput" placeholder="访问码"/><button class="btn" style="width:100%;margin-top:10px" id="codeOk">确认</button>');
+      $('#codeOk').onclick = () => requestAccess($('#codeInput').value.trim());
+      return;
+    }
+    if (res.needApproval) {
+      showGate('<p class="sub" style="text-align:center">已向分享者发送访问申请，<br/>请等待对方授权后刷新本页。</p>');
+      return;
+    }
+    if (res.needWechat) {
+      showGate('<p class="sub" style="text-align:center;margin-bottom:10px">该文档需微信扫码验证</p>' +
+        '<div id="wxBox" style="text-align:center">' +
+        '<iframe id="wxFrame" style="width:240px;height:300px;border:0;margin:0 auto;display:none"></iframe>' +
+        '<img id="wxQr" class="qr" style="margin:0 auto;width:180px;height:180px;display:none"/>' +
+        '<p class="sub" id="wxHint">正在生成二维码…</p>' +
+        '<button class="btn sm" id="wxSim" style="display:none">模拟扫码确认</button></div>');
+      (async () => {
+        try {
+          const r = await fetch('/api/wechat/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purpose: 'verify', share: shareId, viewerToken }) });
+          const d = await r.json();
+          if (!r.ok) { $('#wxHint').textContent = '微信验证启动失败'; return; }
+          if (d.mode === 'real') { $('#wxFrame').src = d.qrUrl; $('#wxFrame').style.display = 'block'; $('#wxHint').style.display = 'none'; }
+          else { $('#wxQr').src = d.qr; $('#wxQr').style.display = 'block'; $('#wxHint').style.display = 'none'; $('#wxSim').style.display = 'inline-block'; }
+          let fails = 0;                 // 连续网络失败计数
+          const t0 = Date.now();
+          let timer = setInterval(async () => {
+            try {
+              const c = await (await fetch('/api/wechat/check?state=' + d.state)).json();
+              fails = 0;
+              if (c.ok && c.verified) {
+                clearInterval(timer);
+                await enterContent({ accessToken: c.accessToken, kind, watermark: wm, restrictions, expiresIn: c.expiresIn });
+                return;
+              }
+            } catch (e) { fails++; }
+            // 上限：连续失败 5 次或轮询超 10 分钟自动停止，避免无限后台请求
+            if (fails >= 5 || Date.now() - t0 > 10 * 60 * 1000) {
               clearInterval(timer);
-              await enterContent({ accessToken: c.accessToken, kind, watermark: wm, restrictions, expiresIn: c.expiresIn });
+              const h = $('#wxHint');
+              if (h) { h.style.display = ''; h.textContent = '验证状态获取超时，请刷新页面重试'; }
             }
-          } catch (e) { /* 轮询容错 */ }
-        }, 1500);
-        $('#wxSim').onclick = async () => {
-          const s = await fetch('/api/wechat/sim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: d.state }) });
-          if (!s.ok) toast('确认失败');
-        };
-      } catch (e) { $('#wxHint').textContent = '微信验证启动失败'; }
-    })();
-    return;
-  }
-  if (res.ok) {
-    await enterContent(res);
-    return;
-  }
-  // 其它错误（人数/次数/过期/销毁）
-  $('#gateTitle').textContent = '无法访问';
-  showGate('<p class="sub" style="text-align:center">' + (res.message || res.error || '访问被拒绝') + '</p>');
+          }, 1500);
+          $('#wxSim').onclick = async () => {
+            const s = await fetch('/api/wechat/sim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: d.state }) });
+            if (!s.ok) toast('确认失败');
+          };
+        } catch (e) { $('#wxHint').textContent = '微信验证启动失败'; }
+      })();
+      return;
+    }
+    if (res.ok) {
+      await enterContent(res);
+      return;
+    }
+    // 其它错误（人数/次数/过期/销毁）
+    $('#gateTitle').textContent = '无法访问';
+    showGate('<p class="sub" style="text-align:center">' + (res.message || res.error || '访问被拒绝') + '</p>');
+  } finally { accessInFlight = false; }
 }
 
 async function loadImage(url) {
@@ -273,16 +398,12 @@ async function loadSourcePreview() {
   try {
     const r = await fetch(url);
     if (r.ok) { await loadImage(url); return; }
-    // 仅 404（无可用预览图）才降级为源文件下载提示
+    // 仅 404（无可用预览图）才降级为源文件下载提示。
+    // 不再预载整个源文件：PSD/AI 动辄几百 MB，白耗流量；点下载时由 saveDoc 按需拉取
     if (r.status === 404) {
-      const cr = await fetch('/api/content/' + shareId + '?at=' + accessToken);
-      if (cr.ok) {
-        const blob = await cr.blob();
-        downloadUrl = URL.createObjectURL(blob);
-        $('#dlWrap').style.display = 'block';
-        $('#dlWrap').innerHTML = '<p>这是设计源文件（PSD / AI / CDR 等），当前暂无在线预览图。</p><p class="sub">可能原因：①服务器未安装转换后端；②该文件上传于启用预览之前。重新上传即可生成预览。</p>';
-        return;
-      }
+      $('#dlWrap').style.display = 'block';
+      $('#dlWrap').innerHTML = '<p>这是设计源文件（PSD / AI / CDR 等），当前暂无在线预览图。</p><p class="sub">可能原因：①服务器未安装转换后端；②该文件上传于启用预览之前。重新上传即可生成预览。</p>';
+      return;
     }
     // 其他错误（403 会话失效 / 500 等）→ 失败提示，勿误导用户下载错误内容
     $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败';
@@ -363,7 +484,20 @@ function pdfBuildPages(from, to) {
     PDFV.pages[i] = rec;
   }
 }
-let pageObs = null, pageQ = Promise.resolve();
+let pageObs = null;
+// 渲染并发槽：pdf.js 各页 render 相互独立，并发 2 让首屏多页/快速滚动出图更快；
+// 单页内存上限已在 pdfRenderPage 内按 GPU 上限钳制，并发不会放大峰值内存。
+const RENDER_CONCURRENCY = 2;
+let renderInFlight = 0;
+const renderWaiters = [];
+function acquireRenderSlot() {
+  if (renderInFlight < RENDER_CONCURRENCY) { renderInFlight++; return Promise.resolve(); }
+  return new Promise(r => renderWaiters.push(r));
+}
+function releaseRenderSlot() {
+  const w = renderWaiters.shift();
+  if (w) w(); else renderInFlight--;
+}
 function obsPages() {
   if (pageObs) pageObs.disconnect();
   if (!('IntersectionObserver' in window)) {          // 老浏览器兜底：顺序渲染（大文档会很慢，但至少能看）
@@ -396,6 +530,7 @@ function releasePage(i) {
   if (!rec || !rec.renderScale) return;
   rec.canvas.width = 1; rec.canvas.height = 1;
   rec.renderScale = 0;
+  if (rec.wrap) rec.wrap.classList.remove('done');   // 像素已回收，重新露出骨架占位
   if (rec.hl) rec.hl.innerHTML = '';
 }
 // 兜底回收：万一观察器事件漏了一拍，滚动结束时把「离视口足够远」的页释放掉。
@@ -411,13 +546,12 @@ function sweepReleased() {
     if (r.bottom < -band || r.top > vh + band) releasePage(i);
   });
 }
-// 串行队列：同一时刻只栅格化一页，避免 pdf.js 并发渲染互相干扰、也避免瞬时内存峰值
+// 并发队列：同时最多栅格化 2 页（acquireRenderSlot 控制），避免 pdf.js 大量并发渲染互相干扰与瞬时内存峰值
 function queuePage(i, scale) {
-  const rec = PDFV.pages[i]; if (!rec) return pageQ;
-  if (rec._busy) return pageQ;
+  const rec = PDFV.pages[i]; if (!rec) return Promise.resolve();
+  if (rec._busy) return Promise.resolve();
   rec._busy = true;
-  pageQ = pageQ.then(() => pdfRenderPage(i, scale)).catch(() => {}).then(() => { rec._busy = false; });
-  return pageQ;
+  return acquireRenderSlot().then(() => pdfRenderPage(i, scale)).catch(() => {}).then(() => { rec._busy = false; releaseRenderSlot(); });
 }
 
 async function pdfMakePage(i) {
@@ -432,18 +566,33 @@ async function pdfMakePage(i) {
   return PDFV.pages[i];
 }
 
+// ---- 移动端 GPU 画布安全上限 ----
+// 手机 GPU 单张纹理有硬上限（iOS ≈ 16.7M 总像素、每边 4096~8192；Android 每边 8192~16384）。
+// 超限的 canvas 只有上半部分能渲染、下半空白 —— 「高清大文件手机端只显示一半」的根因。
+// 渲染任何一页前必须把栅格倍率钳制到安全范围；桌面端上限宽松得多。
+const GPU_CAP = (function () {
+  const coarse = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+  return coarse ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 67e6 };
+})();
+function pdfCapScale(vp1, s) {
+  if (!vp1 || !vp1.width || !vp1.height) return s;
+  let cap = GPU_CAP.side / Math.max(vp1.width, vp1.height);              // 每边上限
+  cap = Math.min(cap, Math.sqrt(GPU_CAP.area / (vp1.width * vp1.height))); // 总像素上限
+  return Math.max(0.1, Math.min(s, cap));
+}
+
 // 按指定栅格倍率渲染某页；旋转通过 viewport 的 rotation 实现，canvas 尺寸随旋转互换，布局天然正确
 async function pdfRenderPage(i, scale) {
   if (!PDFV.doc) return;
   let rec = PDFV.pages[i];
   if (!rec) rec = await pdfMakePage(i);
   if (!rec.page) rec.page = await PDFV.doc.getPage(i);   // 惰性解析：占位页首次进入可视区时才取页对象
-  const s = scale || BASE_SCALE;
   const rot = ((rec.page.rotate || 0) + PDFV.rot) % 360;
-  const vp = rec.page.getViewport({ scale: s, rotation: rot });
   const vp1 = rec.page.getViewport({ scale: 1, rotation: rot });
   rec.vp1 = vp1;
   rec.baseW = vp1.width; rec.baseH = vp1.height;
+  const s = pdfCapScale(vp1, scale || BASE_SCALE);   // 超大页钳制到 GPU 安全范围，否则手机上只渲染出上半页
+  const vp = rec.page.getViewport({ scale: s, rotation: rot });
   rec.canvas.width = Math.ceil(vp.width);
   rec.canvas.height = Math.ceil(vp.height);
   rec.renderScale = s;
@@ -451,7 +600,12 @@ async function pdfRenderPage(i, scale) {
   try {
     await rec.page.render({ canvasContext: rec.canvas.getContext('2d'), viewport: vp }).promise;
   } catch (e) { rec.renderScale = 0; return; }
+  rec.wrap.classList.add('done');   // 渲染完成：隐藏占位骨架
   PDFV.rendered.add(i);
+  // 翻页预渲染：当前页仍在可视区时预渲下一页（vis 判断防止连环预渲把整本渲完）
+  if (PDFV.vis && PDFV.vis.has(i) && i + 1 <= PDFV.total && PDFV.pages[i + 1] && !PDFV.rendered.has(i + 1)) {
+    queuePage(i + 1, s);
+  }
   // 惰性渲染下，搜索命中的页往往是「渲染完成后」才拿到 vp1，这里补绘一次高亮，否则高亮会丢
   if (PDFV.hits.length) pdfRefreshHl();
 }
@@ -486,6 +640,7 @@ function renderUnlockBox(limit, total) {
       if (!r.ok) { $('#unlockErr').textContent = d.message || '密码错误'; return; }
       needProtect = false;
       box.remove();
+      PDFV.text = null;   // 解锁后可搜索范围变了，清掉旧的全量文本索引，下次搜索时按全部页重建
       // 解锁后把剩余页补齐（同样走惰性渲染），并同步可搜索范围与缩略图
       PDFV.limit = PDFV.total;
       pdfBuildPages(limit + 1, total);
@@ -506,11 +661,21 @@ async function loadPdfFromUrl(src, failMsg) {
     if (!window.pdfjsLib) { $('#pages').innerHTML = '<p class="sub">PDF 组件加载失败（本地 PDF.js 缺失）</p>'; return; }
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
     // URL 模式用 Range 流式拉取（第一页先出）；data 模式一次性加载（PPT 转换件）。
+    // 解析/下载期间盖加载提示：大文件这段可达十几秒，纯空白会被当成"打不开"。
+    const fmtMB = (n) => (n / 1048576).toFixed(1) + ' MB';
+    showDocLoading('正在加载文档…');
+    const lt = pdfjsLib.getDocument(
+      src.url ? { url: src.url, rangeChunkSize: 1048576 } : { data: src.data }
+    );
+    lt.onProgress = (d) => {
+      if (!d || !d.loaded) return;
+      if (d.total) updateDocLoading('正在加载文档… ' + Math.min(100, Math.round(d.loaded / d.total * 100)) + '%（' + fmtMB(d.loaded) + ' / ' + fmtMB(d.total) + '）');
+      else updateDocLoading('正在加载文档… 已加载 ' + fmtMB(d.loaded));
+    };
     try {
-      PDFV.doc = await pdfjsLib.getDocument(
-        src.url ? { url: src.url, rangeChunkSize: 1048576 } : { data: src.data }
-      ).promise;
+      PDFV.doc = await lt.promise;
     } catch (e) {
+      hideDocLoading();
       $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败'; showGate('<p class="sub">' + (failMsg || 'PDF 加载失败') + '</p>'); return;
     }
     pdfDoc = PDFV.doc;
@@ -541,6 +706,7 @@ async function loadPdfFromUrl(src, failMsg) {
     obsPages();             // 惰性渲染可见页
     queuePage(1, BASE_SCALE);
     pdfTrackPage();
+    hideDocLoading();       // 占位页已铺好、第一页开始渲染：撤掉整层提示，未渲完的页由骨架动画接管
 }
 
 // PPT：后端 LibreOffice 转 PDF 后按 PDF 查看器打开（缩放/拖移/试看/水印全套复用）。
@@ -630,10 +796,27 @@ async function loadContent(k) {
   }
 
   if (k === 'docx') {
-    const r = await fetch('/api/content/' + shareId + '?at=' + accessToken);
-    const html = await r.text();
-    $('#docxWrap').style.display = 'block';
-    $('#docxBody').innerHTML = html;
+    showDocLoading('正在加载文档…');
+    try {
+      const r = await fetch('/api/content/' + shareId + '?at=' + accessToken);
+      if (!r.ok) {
+        // 会话过期/分享失效时后端返回 JSON 错误，绝不能把错误报文当 HTML 渲染进正文
+        hideDocLoading();
+        const d = await r.json().catch(() => ({}));
+        $('#gate').style.display = 'block'; $('#gateTitle').textContent = '无法加载';
+        showGate('<p class="sub" style="text-align:center">' + escapeHtml(d.message || '文档加载失败，会话可能已过期，请刷新页面重试') + '</p>');
+        return;
+      }
+      const html = await r.text();
+      $('#docxWrap').style.display = 'block';
+      $('#docxBody').innerHTML = html;
+    } catch (e) {
+      hideDocLoading();
+      $('#gate').style.display = 'block'; $('#gateTitle').textContent = '加载失败';
+      showGate('<p class="sub" style="text-align:center">网络异常，文档加载失败，请刷新重试</p>');
+      return;
+    }
+    hideDocLoading();
     return;
   }
 
@@ -721,7 +904,7 @@ function zoomFit() { if (zoomMode === 'pdf') pdfFitWidth(); else if (zoomMode ==
 function pdfEnsureCrisp() {
   if (crispTimer) clearTimeout(crispTimer);
   crispTimer = setTimeout(async () => {
-    const need = Math.min(ZOOM_CFG.pdfCrispCap, BASE_SCALE * PDFV.display);
+    const needBase = Math.min(ZOOM_CFG.pdfCrispCap, BASE_SCALE * PDFV.display);
     // 只处理「当前在可视区」的页：旧实现对每一页都做 getBoundingClientRect，
     // 791 页时每次缩放要读近 800 次布局 —— 换成观察器维护的可见页集合后基本零成本。
     let list = Array.from(PDFV.vis || []);
@@ -731,6 +914,9 @@ function pdfEnsureCrisp() {
     for (const i of list) {
       const rec = PDFV.pages[i];
       if (!rec || !rec.canvas || !rec.wrap.parentNode) continue;
+      // need 按每页实际尺寸钳制：超大页受 GPU 上限截断后 renderScale 达不到原始 need，
+      // 不钳制会导致每次缩放后都对该页反复重渲
+      const need = pdfCapScale(rec.vp1, needBase);
       if (rec.renderScale >= need - ZOOM_CFG.pdfCrispMargin) continue;
       await queuePage(i, need);
     }
@@ -883,6 +1069,7 @@ async function pdfRotate(delta) {
     rec.renderScale = 0;
     const t = rec.baseW; rec.baseW = rec.baseH; rec.baseH = t;   // 宽高互换占位，避免旋转瞬间布局跳动
     rec.canvas.width = 1; rec.canvas.height = 1;                // 释放旧画布，避免 pdf.js 尺寸校验报错
+    rec.wrap.classList.remove('done');                          // 旋转后需重渲，重新露出骨架
     pdfSizePage(rec);
   }
   pdfSetView(PDFV.view);        // 重新排版（旋转后宽高互换，需重算适配）
@@ -1221,17 +1408,21 @@ function bindToolbar() {
     sheet.dataset.bound = '1';
     sheet.addEventListener('click', (e) => { if (e.target.dataset.close) closeMore(); });
   }
-  // 演示模式键盘
-  document.addEventListener('keydown', (e) => {
-    if (!PDFV.present) return;
-    if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); pdfGoPage(PDFV.cur - 1, true); }
-    else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); pdfGoPage(PDFV.cur + 1, true); }
-    else if (e.key === 'Escape') presentExit();
-  });
-  // 用户按 Esc / 系统手势退出全屏时，同步退出演示态，否则会留下一条收不起来的底栏
-  document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement && PDFV.present) presentExit();
-  });
+  // 演示模式键盘 / 全屏同步：document 级监听只允许挂一次
+  // （bindToolbar 可能被多次调用，重复绑定会导致按一次方向键翻多页）
+  if (!bindToolbar._docBound) {
+    bindToolbar._docBound = true;
+    document.addEventListener('keydown', (e) => {
+      if (!PDFV.present) return;
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); pdfGoPage(PDFV.cur - 1, true); }
+      else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); pdfGoPage(PDFV.cur + 1, true); }
+      else if (e.key === 'Escape') presentExit();
+    });
+    // 用户按 Esc / 系统手势退出全屏时，同步退出演示态，否则会留下一条收不起来的底栏
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && PDFV.present) presentExit();
+    });
+  }
 }
 
 // ---------- 更多面板 / 文档属性 ----------
@@ -1492,10 +1683,23 @@ function touchDist(e) { const a = e.touches[0], b = e.touches[1]; return Math.hy
 function touchMid(e) { const a = e.touches[0], b = e.touches[1]; return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }; }
 
 (async () => {
-  if (!shareId) { $('#gateTitle').textContent = '缺少参数'; showGate('<p class="sub">无效的分享链接</p>'); return; }
-  const meta = await loadMeta();
-  if (!meta) return;
-  $('#gateTitle').textContent = '安阅 · 安全预览';
-  showGate('<p class="sub" style="text-align:center;margin-bottom:12px">' + docName + '</p><button class="btn" style="width:100%" id="openBtn">申请打开</button>');
-  $('#openBtn').onclick = () => requestAccess();
+  try {
+    if (!shareId) { $('#gateIcon').textContent = '⚠️'; $('#gateTitle').textContent = '缺少参数'; showGate('<p class="sub">无效的分享链接</p>'); return; }
+    const meta = await loadMeta();
+    if (!meta) return;
+    $('#gateTitle').textContent = (brandName || '安阅') + ' · 安全预览';
+    // 按钮文案必须跟验证方式一致：公开分享不能显示「申请打开」（访客会以为还要等授权，
+    // 实际点一下就直接进）。公开/仅访问码的用中性文案。
+    const cta = meta.requiresCode ? '输入访问码打开'
+      : meta.authMode === 'approve' ? '申请打开'
+      : meta.authMode === 'wechat' ? '微信扫码验证'
+      : '打开文档';
+    showGate('<p class="sub" style="text-align:center;margin-bottom:12px">' + escapeHtml(docName) + '</p><button class="btn" style="width:100%" id="openBtn">' + cta + '</button>');
+    $('#openBtn').onclick = () => requestAccess();
+  } catch (e) {
+    // 兜底：任何未捕获异常都不再让页面停在"正在准备…"，把原因显示出来便于排查
+    $('#gateIcon').textContent = '⚠️';
+    $('#gateTitle').textContent = '无法打开';
+    showGate('<p class="sub" style="text-align:center">' + ((e && e.message) || '页面初始化异常') + '</p>');
+  }
 })();

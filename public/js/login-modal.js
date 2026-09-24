@@ -116,6 +116,9 @@
   }
 
   async function submit() {
+    const btn = document.getElementById('loginSubmit');
+    // 防抖：请求进行中忽略重复提交（连点/回车），避免重复注册或重复登录请求
+    if (btn && btn.disabled) return;
     const email = document.getElementById('loginEmail').value.trim();
     const pw = document.getElementById('loginPw').value;
     const realName = (document.getElementById('loginRealName').value || '').trim();
@@ -125,7 +128,6 @@
     if (!email || !pw) { msg.textContent = '请填写邮箱和密码'; return; }
     if (loginMode === 'register' && pw.length < 8) { msg.textContent = '密码至少 8 位'; return; }
     if (loginMode === 'register' && !realName) { msg.textContent = '请填写真实姓名'; return; }
-    const btn = document.getElementById('loginSubmit');
     btn.disabled = true;
     try {
       if (loginMode === 'register') {
@@ -171,7 +173,7 @@
       const t = document.getElementById('toast');
       if (t) { t.textContent = '登录成功'; t.classList.add('show'); }
     }
-    // 登录成功后整页刷新一次：后台各面板（我的分享/全店分享/文件管理/数据概览…）都是按
+    // 登录成功后整页刷新一次：后台各面板（我的分享/本店分享/文件管理/数据概览…）都是按
     // 「页面解析时的登录态」决定是否拉数据的，晚于页面加载的登录不会自动重拉，用户会看到空列表。
     // 统一刷新一次最可靠；刷新后已有 token，不会再触发登录，无循环风险。
     // 静默登录（记住密码自动恢复）不留看 toast，立即刷；手动登录留 650ms 让用户看到「登录成功」。

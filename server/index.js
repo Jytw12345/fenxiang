@@ -3,6 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const https = require('https');
 const db = require('./db');
 const config = require('./config');
@@ -74,6 +75,11 @@ function enqueuePreview(file) {
           ? await preview.generateImageDownscale(ext, buf, 4096)
           : await preview.generatePreview(ext, file.mime, buf);
         if (pv.ok) {
+          // 竞态守卫：转换期间文件可能已被 replace 路由替换（stored_name 变化），
+          // 此时该预览对应的是旧文件内容，直接丢弃，避免旧预览回写覆盖新文件
+          const cur = await db.getFile(file.id);
+          const srcName = file.storedName || file.stored_name;
+          if (!cur || (cur.stored_name || cur.storedName) !== srcName) return null;
           const pvName = uuid() + (isImg ? '_preview.jpg' : '_preview.png');
           await storage.save(pvName, pv.buffer, isImg ? 'image/jpeg' : 'image/png');
           await db.run('UPDATE files SET preview_path=? WHERE id=?', [pvName, file.id]);
@@ -107,9 +113,14 @@ function enqueueSlidePdf(file) {
         const ext = path.extname(file.originalName || file.original_name || file.storedName || file.stored_name || '').toLowerCase();
         const pv = await preview.generateSlidePdf(ext, buf);
         if (pv.ok) {
+          // 同 enqueuePreview：替换竞态守卫，文件已被替换则丢弃过期转换结果
+          const cur = await db.getFile(file.id);
+          const srcName = file.storedName || file.stored_name;
+          if (!cur || (cur.stored_name || cur.storedName) !== srcName) return null;
           const pvName = uuid() + '_slide.pdf';
           await storage.save(pvName, pv.buffer, 'application/pdf');
           await db.run('UPDATE files SET preview_path=? WHERE id=?', [pvName, file.id]);
+          console.log('[slide] 转换成功并缓存：', pvName, '(', pv.buffer.length, 'bytes )');
           return pvName;
         }
         console.warn('[slide] 转换失败：', pv.reason);
@@ -126,6 +137,10 @@ function enqueueSlidePdf(file) {
   previewJobs.set(file.id, job);
   return job;
 }
+
+// PPT 转换失败负缓存：soffice 未装/转换失败后 10 分钟内直接拒绝，
+// 避免每个访客打开都重新起一次转换子进程（CPU 空转 + 拖慢响应）
+const slideFailUntil = new Map(); // fileId -> 冷却截止时间
 
 // 注册频率限制（进程内存计数，足以拦截自动化批量注册；服务重启清零，单机场景足够）
 const regAttempts = new Map(); // key -> { count, first }
@@ -144,9 +159,27 @@ function regHit(key) {
   else e.count++;
 }
 
+// 登录失败限流（进程内存）：同 IP+邮箱 10 分钟内失败 5 次锁定到窗口结束，成功登录即清零
+const loginFails = new Map(); // key(ip|email) -> { count, first }
+const LOGIN_FAIL_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_FAIL_MAX = 5;
+
+// 访问码试错限流（进程内存）：同 IP+分享 10 分钟内试错 5 次锁定。
+// 防止拿 viewerToken 脚本爆破短数字访问码（4~6 位纯数字几分钟就能试穿）。
+const accessFails = new Map(); // key(ip|shareId) -> { count, first }
+const ACCESS_FAIL_WINDOW_MS = 10 * 60 * 1000;
+const ACCESS_FAIL_MAX = 5;
+
 // ---------- 工具 ----------
 function uuid() { return crypto.randomBytes(16).toString('hex'); }
 function nowMs() { return Date.now(); }
+// 内容响应 ETag：基于文件存储名（replace 换文件后必变 → 缓存自动失效）。
+// 二次查看命中 If-None-Match 直接 304，浏览器用本地缓存，不再重复下载整个文件。
+// 仅用于本地直读分支；COS 302 签名 URL 保持 no-store（短时效签名不可缓存）。
+function etagOf(name) {
+  return 'W/"' + crypto.createHash('sha1').update(String(name || '')).digest('hex').slice(0, 16) + '"';
+}
+function ifNoneMatchHit(req, etag) { return req.headers['if-none-match'] === etag; }
 function clientIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (xff) return String(xff).split(',')[0].trim();
@@ -223,8 +256,17 @@ function hashPassword(pw) {
   return { salt, hash };
 }
 function verifyPassword(pw, salt, hash) {
-  const h = crypto.scryptSync(pw, salt, 64).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(hash, 'hex'));
+  // 健壮性保护：crypto.timingSafeEqual 要求两 buffer 长度严格相等，否则抛 Input buffers must have the same byte length。
+  // 历史上出现过数据库 hash 字段不是 128 hex（64 字节 scrypt）的情况（比如早期版本 bug / 数据迁移损坏），
+  // 此时任何登录都会触发服务端 500 + 把原生 crypto 错误直给前端。改为「长度不等/格式异常一律 false」，
+  // 让前端看到正常的「邮箱或密码错误」，便于用户重置密码或联系管理员。
+  try {
+    const h = crypto.scryptSync(pw, salt, 64).toString('hex');
+    const b1 = Buffer.from(h, 'hex');
+    const b2 = Buffer.from(hash || '', 'hex');
+    if (!b2 || b1.length !== b2.length) return false;
+    return crypto.timingSafeEqual(b1, b2);
+  } catch (e) { return false; }
 }
 function validatePassword(pw) {
   if (typeof pw !== 'string' || pw.length < 8) return '密码至少 8 位';
@@ -540,8 +582,19 @@ const server = http.createServer(async (req, res) => {
       const b = JSON.parse(await readBody(req, 1 << 20));
       const email = String(b.email || '').trim().toLowerCase();
       const pw = String(b.password || '');
+      // 登录失败限流：先查是否已锁定
+      const lk = clientIp(req) + '|' + email;
+      const lf = loginFails.get(lk);
+      if (lf && lf.count >= LOGIN_FAIL_MAX && Date.now() - lf.first < LOGIN_FAIL_WINDOW_MS)
+        return sendJson(res, 429, { error: 'too_many_attempts', message: '尝试次数过多，请 10 分钟后再试' });
       const user = await db.findUserByEmail(email);
-      if (!user || !verifyPassword(pw, user.salt, user.password_hash)) return sendJson(res, 401, { error: 'bad_creds', message: '邮箱或密码错误' });
+      if (!user || !verifyPassword(pw, user.salt, user.password_hash)) {
+        const cur = loginFails.get(lk);
+        if (!cur || Date.now() - cur.first >= LOGIN_FAIL_WINDOW_MS) loginFails.set(lk, { count: 1, first: Date.now() });
+        else cur.count++;
+        return sendJson(res, 401, { error: 'bad_creds', message: '邮箱或密码错误' });
+      }
+      loginFails.delete(lk); // 登录成功清零计数
       if (user.disabled) return sendJson(res, 403, { error: 'disabled', message: '该账号已被禁用，请联系管理员' });
       // 超级管理员名单同步提权：已存在账号若邮箱在 SUPER_ADMIN_EMAILS 内且尚未标记，则升级为超管。
       // 与 Supabase ensureUser 路径一致，避免老账号在新版上线后永远无法成为超管（影响"用户管理"面板可见性）。
@@ -691,6 +744,9 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, 200, '<h3 style="font-family:system-ui">✅ 验证成功</h3><p>请返回原页面继续。</p><script>try{window.close();}catch(e){}</script>');
     }
     if (req.method === 'POST' && p === '/api/wechat/sim') {
+      // 模拟确认仅供未配置微信密钥的演示环境使用；启用真实微信 OAuth 后必须真实扫码，
+      // 否则访客拿到 start 返回的 state 即可自助确认，完全绕过微信验证
+      if (config.WECHAT.enabled) return sendJson(res, 403, { error: 'sim_disabled', message: '已启用微信验证，请通过微信扫码完成验证' });
       const b = JSON.parse(await readBody(req, 1 << 20));
       const ws = await db.getWechatState(b.state);
       if (!ws || ws.status !== 'pending') return sendJson(res, 403, { error: 'bad_state' });
@@ -819,6 +875,8 @@ const server = http.createServer(async (req, res) => {
       }
       const newStored = uuid() + ext;
       await storage.save(newStored, buf, mime);
+      // docx 转换缓存按 file.id 键控；替换文件后必须清掉，否则访客永远看到旧文档内容
+      docxCache.delete(fileId);
       // 源文件：后台异步重新生成预览，不阻塞替换；预览就绪前先置空，由后台任务回写
       enqueuePreview({ id: fileId, storedName: newStored, kind, mime, originalName: name })
         .then(p => { if (p) console.log('[preview] 替换后预览已生成：', fileId); })
@@ -1025,10 +1083,24 @@ const server = http.createServer(async (req, res) => {
       const requiresCode = !!share.access_code;
       let extraObj = {};
       try { extraObj = share.extra ? JSON.parse(share.extra) : {}; } catch (e) { extraObj = {}; }
+      // 账号级白标（自定义品牌）：取分享拥有者 users.prefs.brand，作为该账号所有分享的统一品牌。
+      // 这是白标的唯一来源，历史 per-share extra.brand 不再使用（编辑分享时会自动清除）。
+      let accountBrand = null;
+      try {
+        if (share.owner_id) {
+          const owner = await db.getUser(share.owner_id);
+          if (owner && owner.prefs) {
+            const op = JSON.parse(owner.prefs);
+            if (op && op.brand) accountBrand = op.brand;
+          }
+        }
+      } catch (e) { /* 取品牌失败不阻断分享打开 */ }
       // 保护密码不暴露给前端，仅返回是否需要密码及预览页数
       const safeExtra = {
         previewPages: Number(extraObj.previewPages) || 0,
-        needProtect: !!(extraObj.previewPages && extraObj.protectPassword)
+        needProtect: !!(extraObj.previewPages && extraObj.protectPassword),
+        // 白标（自定义品牌）：需暴露给访客端渲染，故回传；不含任何敏感字段
+        brand: accountBrand
       };
       return sendJson(res, 200, {
         shareId: share.id, name: share.name, kind: share.kind, status: share.status,
@@ -1078,8 +1150,20 @@ const server = http.createServer(async (req, res) => {
       if (share.max_views > 0 && totalViews >= share.max_views)
         return sendJson(res, 403, { error: 'limit_views', message: '阅读次数已达上限' });
 
-      if (share.access_code && body.code !== share.access_code)
+      if (share.access_code && body.code !== share.access_code) {
+        // 访问码试错限流：未带 code 的首访（弹码框）不算试错，带错 code 才计数
+        const ak = clientIp(req) + '|' + shareId;
+        const f = accessFails.get(ak);
+        if (f && f.count >= ACCESS_FAIL_MAX && Date.now() - f.first < ACCESS_FAIL_WINDOW_MS)
+          return sendJson(res, 429, { error: 'too_many_attempts', message: '尝试次数过多，请 10 分钟后再试' });
+        if (body.code) {
+          const cur = accessFails.get(ak);
+          if (!cur || Date.now() - cur.first >= ACCESS_FAIL_WINDOW_MS) accessFails.set(ak, { count: 1, first: Date.now() });
+          else cur.count++;
+        }
         return sendJson(res, 200, { needCode: true, message: '需要访问码' });
+      }
+      if (share.access_code) accessFails.delete(clientIp(req) + '|' + shareId); // 验证通过即清零
 
       // 链接防转发：绑定首次成功打开的设备，阻止把链接转发给他人使用。
       // 保守设计：仅当分享开启「链接防转发」且已绑定到别的设备时才拦截，避免误伤正常多设备查看。
@@ -1123,6 +1207,13 @@ const server = http.createServer(async (req, res) => {
       const raw = u.searchParams.get('raw') === '1';
       if (file.kind === 'docx' && !raw) {
         const html = await renderDocx(file);
+        // gzip 压缩：长文档转出的 HTML（图片以 base64 内嵌，属高冗余文本）可达数 MB，
+        // 压缩后传输量省 75%+，弱网/手机端加载明显加快；客户端不支持 gzip 时回退原文
+        if ((req.headers['accept-encoding'] || '').includes('gzip')) {
+          const gz = zlib.gzipSync(Buffer.from(html), { level: 6 });
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Encoding': 'gzip', 'Content-Length': gz.length, ...frameGuardHeaders() });
+          return res.end(gz);
+        }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...frameGuardHeaders() });
         return res.end(html);
       }
@@ -1171,7 +1262,9 @@ const server = http.createServer(async (req, res) => {
         });
         return res.end('Redirecting to COS...');
       }
-      const baseHeaders = { 'Content-Type': ct, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' };
+      const etag = etagOf(file.stored_name);
+      if (ifNoneMatchHit(req, etag)) { res.writeHead(304, { ETag: etag }); return res.end(); }
+      const baseHeaders = { 'Content-Type': ct, 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=3600', ETag: etag };
       if (raw) {
         const fn = encodeURIComponent(file.original_name || 'download');
         baseHeaders['Content-Disposition'] = 'attachment; filename="' + fn + "\"; filename*=UTF-8''" + fn;
@@ -1187,7 +1280,10 @@ const server = http.createServer(async (req, res) => {
           start = Math.max(0, total - parseInt(m[2], 10));
           end = total - 1;
         }
-        if (isNaN(start) || isNaN(end) || start > end || end >= total) {
+        // end 越界时按 RFC 7233 收敛到最后一字节；仅 start 越界才 416
+        // （否则 pdf.js 等客户端发 bytes=0-999999999 探测总长时会误报 416）
+        if (end >= total) end = total - 1;
+        if (isNaN(start) || isNaN(end) || start > end || start >= total) {
           res.writeHead(416, { 'Content-Range': 'bytes */' + total });
           return res.end();
         }
@@ -1224,8 +1320,10 @@ const server = http.createServer(async (req, res) => {
           return res.end('Redirecting to COS...');
         }
         const data = await storage.readBuffer(file.preview_path);
+        const petag = etagOf(file.preview_path);
+        if (ifNoneMatchHit(req, petag)) { res.writeHead(304, { ETag: petag }); return res.end(); }
         const isJpg = /\.jpe?g$/i.test(file.preview_path);
-        res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+        res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'private, max-age=3600', ETag: petag });
         return res.end(data);
       }
       // 预览尚未生成：首次访问时按需生成（后台任务未完成则在此等待其完成，避免重复转换）。
@@ -1242,9 +1340,11 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(302, { 'Location': signed, 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' });
             return res.end('Redirecting to COS...');
           }
+          const gtag = etagOf(pvPath);
+          if (ifNoneMatchHit(req, gtag)) { res.writeHead(304, { ETag: gtag }); return res.end(); }
           const data = await storage.readBuffer(pvPath);
           const isJpg = /\.jpe?g$/i.test(pvPath);
-          res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+          res.writeHead(200, { 'Content-Type': isJpg ? 'image/jpeg' : 'image/png', 'Content-Length': data.length, 'Cache-Control': 'private, max-age=3600', ETag: gtag });
           return res.end(data);
         }
       }
@@ -1264,28 +1364,47 @@ const server = http.createServer(async (req, res) => {
       const file = await db.getFile(share.file_id);
       if (!file || file.kind !== 'slide') return sendJson(res, 404, { error: 'no_file' });
       if (!file.preview_path) {
-        try { await enqueueSlidePdf(file); } catch (e) { /* 转换失败走下方降级 */ }
-        const fresh = await db.getFile(share.file_id);
-        if (!fresh.preview_path) {
+        // 负缓存命中：近期转换失败过，直接降级，不再重复起子进程
+        const failUntil = slideFailUntil.get(share.file_id) || 0;
+        if (nowMs() < failUntil) {
           return sendJson(res, 404, { error: 'slide_convert_failed', message: '服务器未安装 PPT 转换组件（LibreOffice），该文件暂只能下载查看' });
         }
+        try { await enqueueSlidePdf(file); } catch (e) { /* 转换失败走下方降级 */ }
+        const fresh = await db.getFile(share.file_id);
+        if (!fresh || !fresh.preview_path) {
+          slideFailUntil.set(share.file_id, nowMs() + 10 * 60 * 1000);
+          return sendJson(res, 404, { error: 'slide_convert_failed', message: '服务器未安装 PPT 转换组件（LibreOffice），该文件暂只能下载查看' });
+        }
+        // 关键：转换刚产出的 preview_path 必须写回本地变量。
+        // 否则首次打开时下面仍用「转换前」那个空值去取 COS 对象 → 签名 URL 指向不存在的 Key
+        // → COS 返回 403/404 的 XML（非 JSON）→ 前端 r.json() 失败 → 弹出无信息的
+        // 「该 PPT 暂不支持在线预览」。第二次打开才正常（那时库里已有值），极易被误判成"没装组件"。
+        file.preview_path = fresh.preview_path;
       }
       if (storage.cosEnabled) {
         const signed = await storage.getSignedUrl(file.preview_path, { contentType: 'application/pdf' });
         res.writeHead(302, { 'Location': signed, 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' });
         return res.end('Redirecting to COS...');
       }
+      const stag = etagOf(file.preview_path);
+      if (ifNoneMatchHit(req, stag)) { res.writeHead(304, { ETag: stag }); return res.end(); }
       const data = await storage.readBuffer(file.preview_path);
-      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': data.length, 'Cache-Control': 'private, max-age=3600', ETag: stag });
       return res.end(data);
     }
 
-    // 访问日志上报
+    // 访问日志上报（防伪造：必须携带有效访问会话，事件类型白名单，viewerToken 以会话为准。
+    // 否则任何人凭 shareId 即可灌 event='open' 日志，虚增打开数/人数、触发 max_views/max_viewers 把分享锁死）
     if (req.method === 'POST' && p === '/api/log') {
       const body = JSON.parse(await readBody(req, 1 << 20));
+      const sess = body.accessToken ? await db.getSession(body.accessToken) : null;
+      if (!sess || Number(sess.expires_at) < nowMs() || !body.shareId || sess.share_id !== body.shareId)
+        return sendJson(res, 200, { ok: false, error: 'invalid_session' });
+      const ALLOWED_EVENTS = new Set(['progress', 'heartbeat', 'close', 'timeout', 'search']);
+      const ev = ALLOWED_EVENTS.has(body.event) ? body.event : 'progress';
       await db.recordProgress({
-        shareId: body.shareId, viewerToken: body.viewerToken, ip: clientIp(req),
-        ua: req.headers['user-agent'] || '', event: body.event || 'progress',
+        shareId: sess.share_id, viewerToken: sess.viewer_token, ip: clientIp(req),
+        ua: req.headers['user-agent'] || '', event: ev,
         progress: String(body.progress || ''), now: nowMs()
       });
       return sendJson(res, 200, { ok: true });
@@ -1451,7 +1570,7 @@ const server = http.createServer(async (req, res) => {
       if (!admin) return sendJson(res, 403, { error: 'no_admin' });
       const members = await db.listOrgMembers(admin.org_id);
       return sendJson(res, 200, { members: members.map(m => ({
-        id: m.id, email: m.email, role: m.role, createdAt: m.created_at
+        id: m.id, email: m.email, realName: m.real_name || '', role: m.role, createdAt: m.created_at
       })) });
     }
     // 生成邀请码
@@ -1513,7 +1632,7 @@ const server = http.createServer(async (req, res) => {
       const q = (u.searchParams.get('q') || '').trim().toLowerCase();
       const from = Number(u.searchParams.get('from') || 0);
       const to = Number(u.searchParams.get('to') || 0);
-      let logs = await db.listAudit(1000);
+      let logs = await db.listAudit(5000);   // 内存筛选上限 5000 条（审计仅记管理操作，量小）
       if (action) logs = logs.filter(l => (l.action || '') === action);
       if (actor) logs = logs.filter(l => ((l.actor_email || '') + ' ' + (l.actor_real_name || '')).toLowerCase().includes(actor));
       if (targetType === 'user') logs = logs.filter(l => /_user$/.test(l.action || ''));
@@ -1523,8 +1642,13 @@ const server = http.createServer(async (req, res) => {
       if (from) logs = logs.filter(l => Number(l.created_at) >= from);
       if (to) logs = logs.filter(l => Number(l.created_at) <= to);
       if (q) logs = logs.filter(l => ((l.detail || '') + ' ' + (l.action || '') + ' ' + (l.actor_real_name || '') + ' ' + (l.actor_email || '')).toLowerCase().includes(q));
-      logs = logs.slice(0, 200);
-      return sendJson(res, 200, { logs: logs.map(l => ({
+      // 分页返回：每页 200 条，page 从 1 开始；筛选在内存完成后再切页
+      const per = 200;
+      const total = logs.length;
+      const pages = Math.max(1, Math.ceil(total / per));
+      const page = Math.min(pages, Math.max(1, parseInt(u.searchParams.get('page'), 10) || 1));
+      logs = logs.slice((page - 1) * per, page * per);
+      return sendJson(res, 200, { page, pages, total, logs: logs.map(l => ({
         actorId: l.actor_id, action: l.action, target: l.target, detail: l.detail, createdAt: Number(l.created_at),
         actorEmail: l.actor_email || '', actorRealName: l.actor_real_name || ''
       })) });
@@ -1729,14 +1853,19 @@ const server = http.createServer(async (req, res) => {
 
     return sendJson(res, 404, { error: 'route_not_found' });
   } catch (e) {
-    console.error(e);
-    sendJson(res, 500, { error: 'server_error', message: String(e && e.message) });
+    console.error('[server] 500:', (e && e.stack) || e);
+    // 不向前端泄露内部错误细节（可能含 SQL/路径信息），详情只进服务端日志
+    sendJson(res, 500, { error: 'server_error', message: '服务器内部错误，请稍后重试' });
   }
 });
 
 db.init()
   .then(() => globals.loadEffective())
-  .then(() => {
+  .then(async () => {
+    // 访问日志保留 30 天：启动清一次，之后每天定时清一次。
+    // 心跳/进度事件写入量最大（默认 15 秒一条），不清理表会无限膨胀拖慢所有查询。
+    try { await db.deleteOldLogs(30); } catch (e) { console.error('[logs] 启动清理失败:', e.message); }
+    setInterval(() => { db.deleteOldLogs(30).catch(e => console.error('[logs] 定时清理失败:', e.message)); }, 24 * 3600 * 1000);
     server.listen(PORT, () => {
       console.log(`安阅服务已启动: http://localhost:${PORT}（数据库：${db.driverType()}）`);
     });

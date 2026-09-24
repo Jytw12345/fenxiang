@@ -218,7 +218,7 @@ function shareCardHtml(s, own, selectable) {
     hasPreviewLimit ? '<span class="tag on">限前' + extra.previewPages + '页</span>' : '',
     hasPreviewLimit && extra.protectPassword ? '<span class="tag on">有密码</span>' : '',
     r.copy ? '<span class="tag off">禁复制</span>' : '', r.print ? '<span class="tag off">禁打印</span>' : '',
-    r.download ? '<span class="tag off">禁下载</span>' : '', r.screenshot ? '<span class="tag off">防截图</span>' : ''
+    r.download ? '<span class="tag off">禁下载</span>' : '', r.screenshot ? '<span class="tag off">截图留痕</span>' : ''
   ].join('');
   const menuId = 'sm_' + s.shareId;
   const checked = selectedShareIds.has(s.shareId);
@@ -265,7 +265,23 @@ function shareMenuHtml(s, own) {
     : `<button class="${it.danger ? 'danger' : ''}" data-act="${it.act}" data-sid="${s.shareId}" data-file="${s.fileId || ''}">${it.label}</button>`
   ).join('');
 }
-window.copyLink = (l) => { navigator.clipboard.writeText(l); toast('已复制'); };
+// 复制到剪贴板：navigator.clipboard 仅在安全上下文可用（http://IP、自签证书下为 undefined），
+// 缺失时回退到 textarea + execCommand，保证「复制链接」在非安全上下文也能用。
+function copyText(t) {
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = t; ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      ok ? resolve() : reject(new Error('execCommand copy failed'));
+    } catch (e) { reject(e); }
+  });
+}
+window.copyLink = (l) => { copyText(l).then(() => toast('已复制链接')).catch(() => toast('复制失败，请手动复制地址')); };
 
 // 格式化阅读时长（秒 → 中文）
 function fmtDur(sec) {
@@ -336,13 +352,15 @@ window.showLogs = async (id) => {
   $('#logsModal').classList.add('show');
 };
 window.destroy = async (id) => {
-  await fetch(`/api/admin/${token}/share/${id}/destroy`, { method: 'POST' });
+  const r = await fetch(`/api/admin/${token}/share/${id}/destroy`, { method: 'POST' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); toast('销毁失败：' + (d.message || r.statusText)); return; }
   toast('已远程销毁');
   mineShares = mineShares.map(s => s.shareId === id ? { ...s, status: 'destroyed' } : s);
   renderMineGrid();
 };
 window.restore = async (id) => {
-  await fetch(`/api/admin/${token}/share/${id}/restore`, { method: 'POST' });
+  const r = await fetch(`/api/admin/${token}/share/${id}/restore`, { method: 'POST' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); toast('恢复失败：' + (d.message || r.statusText)); return; }
   toast('已恢复');
   mineShares = mineShares.map(s => s.shareId === id ? { ...s, status: 'active' } : s);
   renderMineGrid();
@@ -420,8 +438,7 @@ window.bulkDeleteShares = async () => {
 window.bulkCopyLinks = () => {
   const links = mineShares.filter(s => selectedShareIds.has(s.shareId)).map(s => location.origin + s.link);
   if (!links.length) return;
-  navigator.clipboard.writeText(links.join('\n'));
-  toast(`已复制 ${links.length} 条链接`);
+  copyText(links.join('\n')).then(() => toast(`已复制 ${links.length} 条链接`)).catch(() => toast('复制失败，请手动复制'));
 };
 // 批量改权限弹窗：所有字段默认「不修改」，只提交被真正触碰过的键。
 window.bulkEditShares = () => {
@@ -451,7 +468,7 @@ window.bulkEditShares = () => {
       <div class="efield egrid-2"><div class="ef-hd"><label>内容保护</label><i>不选=不修改</i></div>
         <select id="bProtect">
           <option value="keep">不修改</option>
-          <option value="on">全部开启（禁复制 / 禁打印 / 禁下载 / 防截图）</option>
+          <option value="on">全部开启（禁复制 / 禁打印 / 禁下载 / 截图留痕）</option>
           <option value="off">全部关闭</option>
         </select></div>
     </div>
@@ -504,6 +521,8 @@ function applySettingsLocal(x, s) {
 }
 
 let editId = null;
+// 编辑弹窗打开时暂存的 extra 快照（含白标 brand 等），保存时据此合并，避免从零重建清空未知字段
+let currentEditExtra = {};
 window.editShare = async (id) => {
   editId = id;
   // 优先用本地缓存（shareById）秒开：列表刚拉过，数据足够新，保存时后端还会做权限校验。
@@ -532,15 +551,19 @@ window.editShare = async (id) => {
 
 function renderEditModal(s) {
   const extra = s.extra || {};
+  // 关键：保留现有 extra（含白标等字段），保存时据此合并而非从零重建，避免静默清空
+  currentEditExtra = extra;
   const pp = Number(extra.previewPages) || 0;
   const pEnabled = pp > 0;
   // 有效期：判断是预设还是自定义
+  // 注意：datetime-local 输入框按本地时区展示/解析，必须用本地时间生成初始值。
+  // 之前用 toISOString()（UTC）导致东八区下显示/保存相差 8 小时，反复编辑会把过期时间持续前移。
   let expSelect = '0', expCustom = '';
   const _expMs = toDateMs(s.expiresAt);
   if (_expMs) {
     const preset = [1,3,7,30].find(n => Math.abs(_expMs - (Date.now() + n * 86400000)) < 3600000);
     if (preset) expSelect = String(preset);
-    else { expSelect = 'custom'; expCustom = new Date(_expMs).toISOString().slice(0, 16); }
+    else { expSelect = 'custom'; expCustom = toLocalInputValue(_expMs); }
   }
   // 布局（紧凑版）：三列网格 7 字段压成 2 行 + 水印整行 → 内容保护四项一行 → 试看限制单行内联
   $('#editBody').innerHTML = `
@@ -559,11 +582,12 @@ function renderEditModal(s) {
       </div>
       <div class="efield">
         <div class="ef-hd"><label>访问码</label><i>留空不设</i></div>
-        <input id="eCode" value="${s.accessCode || ''}" placeholder="访客需输入才可查看" />
+        <input id="eCode" value="${esc(s.accessCode || '')}" placeholder="访客需输入才可查看" />
       </div>
       <div class="efield">
         <div class="ef-hd"><label>验证方式</label></div>
-        <select id="eAuth"><option value="open" ${s.authMode==='open'?'selected':''}>公开</option><option value="approve" ${s.authMode==='approve'?'selected':''}>申请授权</option></select>
+        <select id="eAuth"><option value="open" ${s.authMode==='open'?'selected':''}>公开</option><option value="approve" ${s.authMode==='approve'?'selected':''}>申请授权</option>${s.authMode==='wechat'?'<option value="wechat" selected>微信验证</option>':''}</select>
+        ${s.authMode==='wechat'?'<i class="sub">该分享为微信验证模式，如改保存为其它方式将不可逆</i>':''}
       </div>
       <div class="efield">
         <div class="ef-hd"><label>最大人数</label><i>0 = 不限</i></div>
@@ -588,18 +612,18 @@ function renderEditModal(s) {
         <label><input type="checkbox" id="eCopy" ${s.restrictions.copy?'checked':''}>禁复制</label>
         <label><input type="checkbox" id="ePrint" ${s.restrictions.print?'checked':''}>禁打印</label>
         <label><input type="checkbox" id="eDl" ${s.restrictions.download?'checked':''}>禁下载</label>
-        <label><input type="checkbox" id="eSc" ${s.restrictions.screenshot?'checked':''}>防截图</label>
+        <label><input type="checkbox" id="eSc" ${s.restrictions.screenshot?'checked':''}>截图留痕</label>
         <label><input type="checkbox" id="eAf" ${(extra.antiForward)?'checked':''}>链接防转发</label>
       </div>
 
     <div class="esec esec-sw">
-      <span class="et">试看限制</span><span class="hint">仅 PDF / Word 生效</span><i class="ln"></i>
+      <span class="et">试看限制</span><span class="hint">仅 PDF 生效</span><i class="ln"></i>
       <label class="esw" title="开启后可限制访客只能试看前几页"><input type="checkbox" id="ePreview" ${pEnabled?'checked':''}><span>启用</span></label>
     </div>
     <div class="eprev" id="ePrevBox">
       <div class="pbody">
         <div class="prow"><span>允许预览前</span><input id="ePPages" type="number" min="1" value="${pEnabled?pp:2}" /><span>页</span></div>
-        <div class="prow"><span>超出后需密码</span><input id="ePPwd" type="text" value="${esc(extra.protectPassword||'')}" placeholder="留空则不可看" autocomplete="off" /><span>才能查看</span></div>
+        <div class="prow"><span>超出后需密码</span><input id="ePPwd" type="text" value="${esc(extra.protectPassword||'')}" placeholder="留空则不可查看更多" autocomplete="off" /><span>才能查看</span></div>
       </div>
     </div>`;
   const eExpire = document.getElementById('eExpire');
@@ -621,7 +645,10 @@ $('#saveEdit').onclick = async () => {
   if (eExpire && eExpire.value === 'custom') {
     const v = $('#eExpireCustom').value;
     const dt = v ? new Date(v).getTime() : 0;
-    if (dt > Date.now()) expiresAt = dt;
+    // 过去的时间不允许提交：以前会静默落成 null（永久有效），与「立即失效」的预期相反
+    if (!dt) { toast('请选择自定义过期时间'); return; }
+    if (dt <= Date.now()) { toast('过期时间必须晚于当前时间'); return; }
+    expiresAt = dt;
   } else {
     const expVal = parseInt(eExpire ? eExpire.value : '0', 10) || 0;
     if (expVal > 0) expiresAt = Date.now() + expVal * 86400000;
@@ -629,9 +656,14 @@ $('#saveEdit').onclick = async () => {
   const previewEnabled = $('#ePreview').checked;
   const previewPages = previewEnabled ? (parseInt($('#ePPages').value, 10) || 2) : 0;
   const protectPassword = previewEnabled ? ($('#ePPwd').value.trim() || null) : null;
-  const extra = { previewPages };
-  if (protectPassword) extra.protectPassword = protectPassword;
+  // 合并而非从零重建：保留白标 brand 等打开弹窗时已有的字段，杜绝「改一次权限就清空白标」
+  const extra = Object.assign({}, currentEditExtra);
+  extra.previewPages = previewPages;
+  if (protectPassword) extra.protectPassword = protectPassword; else delete extra.protectPassword;
   extra.antiForward = $('#eAf').checked;
+  // 白标已改为账号级（存于 users.prefs.brand，由服务端在 GET /api/share 时注入），
+  // 此处不再保留历史 per-share extra.brand，统一清除，避免与账号级品牌冲突
+  delete extra.brand;
   const body = {
     maxViewers: parseInt($('#eMV').value, 10) || 0, maxViews: parseInt($('#eMO').value, 10) || 0,
     durationSec: (parseInt($('#eDur').value, 10) || 0) * 60, accessCode: $('#eCode').value.trim() || null,
@@ -674,7 +706,8 @@ window.showApprovals = async (id) => {
   $('#apprModal').classList.add('show');
 };
 window.decide = async (id, vt, decision) => {
-  await fetch(`/api/admin/${token}/share/${id}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewerToken: vt, decision }) });
+  const r = await fetch(`/api/admin/${token}/share/${id}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewerToken: vt, decision }) });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); toast('操作失败：' + (d.message || r.statusText)); showApprovals(id); return; }
   toast(decision === 'approve' ? '已授权' : '已拒绝'); showApprovals(id);
 };
 
@@ -784,7 +817,7 @@ function hideAllPanels() {
 function switchTab(t) {
   const adminTabs = ['org','members','invite','allshares','stats','dashboard','users','audit'];
   const crumb = $('#pageCrumb');
-  const crumbMap = { create:'创建分享', mine:'我的分享', files:'文件管理', settings:'设置', dashboard:'数据概览', org:'全店分享', members:'全店分享', invite:'全店分享', stores:'门店管理' };
+  const crumbMap = { create:'创建分享', mine:'我的分享', files:'文件管理', settings:'设置', dashboard:'数据概览', org:'本店分享', members:'本店分享', invite:'本店分享', stores:'门店管理' };
   const crumbText = crumbMap[t] || (adminTabs.includes(t) ? '管理后台' : '工作台');
   if (crumb) crumb.textContent = crumbText;
   document.title = '安阅 · ' + crumbText;
@@ -853,13 +886,17 @@ document.querySelectorAll('#sideNav a[data-key]').forEach(a => {
     switchTab(t);
   });
 });
-// 顶部「＋新建分享」按钮
+// 顶部「＋创建分享」按钮
 const btnNewShare = document.getElementById('btnNewShare');
 if (btnNewShare) btnNewShare.addEventListener('click', () => { history.replaceState(null, '', '#create'); switchTab('create'); });
-// 根据 URL hash 初始化 tab；默认 mine
-const initTab = location.hash.replace('#', '') || 'mine';
+// 根据 URL hash 初始化 tab；未知 hash 一律回退 mine（否则 else 分支会把未知值当成本店分享渲染）
+const KNOWN_TABS = ['mine', 'files', 'dashboard', 'create', 'settings', 'org', 'members', 'invite', ...superTabs];
+const initTab = KNOWN_TABS.includes(location.hash.replace('#', '')) ? location.hash.replace('#', '') : 'mine';
 switchTab(initTab);
-window.addEventListener('hashchange', () => switchTab(location.hash.replace('#', '') || 'mine'));
+window.addEventListener('hashchange', () => {
+  const t = location.hash.replace('#', '');
+  switchTab(KNOWN_TABS.includes(t) ? t : 'mine');
+});
 
 function renderShares(container, shares, withOwner, own) {
   if (!shares || !shares.length) { container.innerHTML = '<div class="empty">暂无分享</div>'; return; }
@@ -977,12 +1014,17 @@ async function loadUsers() {
       `<button class="btn ghost sm" onclick="userAct('${u.id}','super',${u.isSuper ? 'false' : 'true'})">${u.isSuper ? '取消超管' : '设为超管'}</button>`,
       `<button class="btn danger sm" onclick="userAct('${u.id}','delete')">删除</button>`
     ].join(' ');
-    return `<tr><td>${esc(u.email)} ${tags}</td><td>${fmtBytes(u.bytes)}</td><td>${u.shareCount}</td>
-      <td><select class="org-sel" onchange="assignUserOrg('${u.id}', this.value, '${u.role === 'admin' ? 'admin' : 'member'}')">${orgOpts(u.orgId)}</select></td>
-      <td>${fmtTs(u.createdAt)}</td><td>${acts}</td></tr>`;
+    return `<tr>
+      <td class="ttl-cell" data-label="邮箱">${esc(u.email)} ${tags}</td>
+      <td data-label="占用">${fmtBytes(u.bytes)}</td>
+      <td data-label="分享数">${u.shareCount}</td>
+      <td data-label="所属门店"><select class="org-sel" onchange="assignUserOrg('${u.id}', this.value, '${u.role === 'admin' ? 'admin' : 'member'}')">${orgOpts(u.orgId)}</select></td>
+      <td data-label="注册时间">${fmtTs(u.createdAt)}</td>
+      <td data-label="操作" class="acts-cell">${acts}</td>
+    </tr>`;
   }).join('') || '<tr><td colspan="6" class="sub">暂无用户</td></tr>';
   $('#superUsers').innerHTML = `<div class="card"><h2>注册用户（${d.users.length}）</h2>
-    <table class="vt"><tr><th>邮箱</th><th>占用</th><th>分享数</th><th>所属门店</th><th>注册时间</th><th>操作</th></tr>${rows}</table>
+    <table class="vt mtab"><thead><tr><th>邮箱</th><th>占用</th><th>分享数</th><th>所属门店</th><th>注册时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="sub" style="margin-top:8px">禁用后该账号无法登录；删除会同时清除其所有分享与文件；在「所属门店」下拉可直接将用户分配到门店并设定角色。</p></div>`;
 }
 window.userAct = async (id, action, val) => {
@@ -1129,23 +1171,27 @@ async function renderStoreList() {
           <div class="store-meta">店长：${o.managerEmail ? esc(o.managerEmail) : '<span class="sub">未指定</span>'} · 成员 ${o.memberCount} 人</div>
         </div>
         <div class="store-acts">
-          <button class="btn ghost sm" onclick="renameStore('${o.id}','${esc(o.name)}')">改名</button>
+          <!-- 只传 id 不插名字：门店名可含单引号/双引号，插入 onclick 属性会被注入破坏 -->
+          <button class="btn ghost sm" onclick="renameStore('${o.id}')">改名</button>
           <button class="btn ghost sm" onclick="toggleStoreMembers('${o.id}')">成员(${o.memberCount})</button>
-          <button class="btn danger sm" onclick="deleteStore('${o.id}','${esc(o.name)}')">删除门店</button>
+          <button class="btn danger sm" onclick="deleteStore('${o.id}')">删除门店</button>
         </div>
         <div class="store-members" id="storeMembers_${o.id}" style="display:none"></div>
       </div>`).join('');
   } catch (e) { wrap.innerHTML = '<div class="empty">加载失败</div>'; }
 }
-window.renameStore = async (id, oldName) => {
-  const name = prompt('修改门店名称', oldName);
+window.renameStore = async (id) => {
+  const meta = allOrgs.find(o => o.id === id);
+  const name = prompt('修改门店名称', meta ? meta.name : '');
   if (!name || !name.trim()) return;
   const r = await fetch('/api/super/org/' + id + '?userToken=' + encodeURIComponent(orgToken), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return toast('失败：' + (d.message || r.statusText));
   toast('已改名'); allOrgs = []; renderStoreList();
 };
-window.deleteStore = async (id, name) => {
+window.deleteStore = async (id) => {
+  const meta = allOrgs.find(o => o.id === id);
+  const name = meta ? meta.name : '该门店';
   if (!(await confirmDialog(`确定删除门店「${name}」？\n删除前请先将该门店成员移出或分配到其他门店，删除后该门店的邀请码也会一并清除。`, { danger: true, title: '删除门店' }))) return;
   const r = await fetch('/api/super/org/' + id + '?userToken=' + encodeURIComponent(orgToken), { method: 'DELETE' });
   const d = await r.json().catch(() => ({}));
@@ -1258,14 +1304,17 @@ function formatAuditDetail(action, detail) {
   return parts.length ? parts.join(' · ') : esc(detail || '—');
 }
 
+let auditPage = 1;   // 审计日志当前页（改筛选条件时重置为 1）
+function auditSearch() { auditPage = 1; fetchAudit(); }
 function auditQueryString() {
   const p = new URLSearchParams();
   const action = $('#afAction').value; if (action) p.set('action', action);
   const tt = $('#afTarget').value; if (tt) p.set('targetType', tt);
   const actor = $('#afActor').value.trim(); if (actor) p.set('actor', actor);
   const q = $('#afQ').value.trim(); if (q) p.set('q', q);
-  const from = $('#afFrom').value; if (from) p.set('from', String(new Date(from).getTime()));
-  const to = $('#afTo').value; if (to) p.set('to', String(new Date(to).getTime() + 86399999));
+  const from = $('#afFrom').value; if (from) { const [y, m, d] = from.split('-').map(Number); p.set('from', String(new Date(y, m - 1, d).getTime())); }
+  const to = $('#afTo').value; if (to) { const [y, m, d] = to.split('-').map(Number); p.set('to', String(new Date(y, m - 1, d).getTime() + 86399999)); }
+  // 注意：不能 new Date('YYYY-MM-DD')，它按 UTC 零点解析，东八区下筛出的范围会整体偏移 8 小时
   return p.toString();
 }
 async function loadAudit() {
@@ -1306,12 +1355,12 @@ async function loadAudit() {
   </div>`;
   ['afAction', 'afTarget', 'afActor', 'afQ', 'afFrom', 'afTo'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) { el.addEventListener('change', fetchAudit); el.addEventListener('keydown', (e) => { if (e.key === 'Enter') fetchAudit(); }); }
+    if (el) { el.addEventListener('change', auditSearch); el.addEventListener('keydown', (e) => { if (e.key === 'Enter') auditSearch(); }); }
   });
-  document.getElementById('afSearch').onclick = fetchAudit;
+  document.getElementById('afSearch').onclick = auditSearch;
   document.getElementById('afReset').onclick = () => {
     ['afAction', 'afTarget', 'afActor', 'afQ', 'afFrom', 'afTo'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-    fetchAudit();
+    auditSearch();
   };
   await fetchAudit();
 }
@@ -1321,21 +1370,30 @@ async function fetchAudit() {
   const qs = auditQueryString();
   wrap.innerHTML = '<p class="sub">加载中…</p>';
   try {
-    const r = await fetch('/api/super/audit?userToken=' + encodeURIComponent(orgToken) + (qs ? '&' + qs : ''));
+    const r = await fetch('/api/super/audit?userToken=' + encodeURIComponent(orgToken) + (qs ? '&' + qs : '') + '&page=' + auditPage);
     const d = await r.json();
     if (d.error) { wrap.innerHTML = '<div class="empty">无权访问</div>'; return; }
     const rows = (d.logs || []).map(l => {
       const actor = l.actorEmail ? esc(l.actorRealName || l.actorEmail) : '系统';
       return `<tr>
-        <td>${fmtTs(l.createdAt)}</td>
-        <td>${esc(auditActionName(l.action))}</td>
-        <td>${formatAuditTarget(l.action, l.target, l.detail)}</td>
-        <td>${formatAuditDetail(l.action, l.detail)}</td>
-        <td class="sub">${actor}</td>
+        <td class="time-cell" data-label="时间">${fmtTs(l.createdAt)}</td>
+        <td class="ttl-cell" data-label="动作">${esc(auditActionName(l.action))}</td>
+        <td data-label="对象">${formatAuditTarget(l.action, l.target, l.detail)}</td>
+        <td data-label="详情">${formatAuditDetail(l.action, l.detail)}</td>
+        <td data-label="操作人"><span class="sub">${actor}</span></td>
       </tr>`;
     }).join('') || '<tr><td colspan="5" class="sub">暂无记录</td></tr>';
-    wrap.innerHTML = `<table><tr><th>时间</th><th>动作</th><th>对象</th><th>详情</th><th>操作人</th></tr>${rows}</table>
-      <p class="sub" style="margin-top:8px">共 ${d.logs ? d.logs.length : 0} 条${qs ? '（已按条件筛选）' : ''}</p>`;
+    const pager = d.pages > 1
+      ? `<div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+          <button class="btn ghost sm" id="afPrev" ${d.page <= 1 ? 'disabled' : ''}>上一页</button>
+          <span class="sub">第 ${d.page} / ${d.pages} 页 · 共 ${d.total} 条${qs ? '（已按条件筛选）' : ''}</span>
+          <button class="btn ghost sm" id="afNext" ${d.page >= d.pages ? 'disabled' : ''}>下一页</button>
+        </div>`
+      : `<p class="sub" style="margin-top:8px">共 ${d.total || (d.logs ? d.logs.length : 0)} 条${qs ? '（已按条件筛选）' : ''}</p>`;
+    wrap.innerHTML = `<table class="mtab"><thead><tr><th>时间</th><th>动作</th><th>对象</th><th>详情</th><th>操作人</th></tr></thead><tbody>${rows}</tbody></table>${pager}`;
+    const prev = document.getElementById('afPrev'), next = document.getElementById('afNext');
+    if (prev) prev.onclick = () => { auditPage = d.page - 1; fetchAudit(); };
+    if (next) next.onclick = () => { auditPage = d.page + 1; fetchAudit(); };
   } catch (e) { wrap.innerHTML = '<div class="empty">加载失败</div>'; }
 }
 function fmtBytes(n) {
@@ -1502,11 +1560,22 @@ function isSuperNow() {
   const t = document.getElementById('tabUsers');
   return !!(t && t.style.display !== 'none');
 }
+// 行内「更多」菜单开关。
+// 注意：同一个分享会同时出现在「我的分享 / 本店分享 / 跨店分享」多个面板里（各面板都调 shareCardHtml），
+// 菜单 id 因此重复，而 getElementById 只返回文档里第一个 —— 通常是被 hideAllPanels 隐藏的 #list 里那份，
+// 于是切到「本店分享 / 跨店分享」后点「更多」毫无反应。改为从事件源就近找自身的 .menu-list，不再依赖全局 id。
 window.toggleRowMenu = (e, id) => {
   e.stopPropagation();
-  document.querySelectorAll('.menu-list.open').forEach(m => { if (m.id !== id) m.classList.remove('open'); });
-  const el = document.getElementById(id);
-  if (el) el.classList.toggle('open');
+  const host = e.currentTarget && e.currentTarget.closest ? e.currentTarget.closest('.row-menu') : null;
+  const el = (host && host.querySelector('.menu-list')) || (id ? document.getElementById(id) : null);
+  if (!el) return;
+  const wasOpen = el.classList.contains('open');
+  document.querySelectorAll('.menu-list.open').forEach(m => m.classList.remove('open'));
+  if (wasOpen) return;
+  el.classList.add('open');
+  // 卡片贴着视口底部时菜单会被底部裁掉（看着像"点了没反应"），空间不够就改为向上弹
+  el.classList.remove('up');
+  if (el.getBoundingClientRect().bottom > window.innerHeight - 8) el.classList.add('up');
 };
 document.addEventListener('click', () => {
   document.querySelectorAll('.menu-list.open').forEach(m => m.classList.remove('open'));
@@ -1777,6 +1846,7 @@ function loadDashboard() {
 // ========== 创建分享（原 app.js 迁入，单页内无刷新） ==========
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB';
 let selectedFile = null;
+let previewObjUrl = null;   // 创建页选完文件后本地预览用的 objectURL（图片/PDF），移除/重选时回收
 
 function requireLogin() {
   if (localStorage.getItem('userToken')) return true;
@@ -1796,11 +1866,21 @@ if (fileInput) fileInput.addEventListener('change', () => {
 });
 
 function setFile(f) {
+  // 超过上限：选择即拦截，不上传（与服务端上传上限一致，避免传到最后才报错）
+  if (f.size > 200 * 1024 * 1024) {
+    toast('文件超过 200MB 上限，无法上传');
+    selectedFile = null;
+    if (fileInput) fileInput.value = '';
+    if (previewObjUrl) { URL.revokeObjectURL(previewObjUrl); previewObjUrl = null; }
+    $('#fileinfo').style.display = 'none';
+    return;
+  }
   // 不支持的格式：选择即拦截，不上传
   if (detectKind(f) === 'download') {
     toast('不支持的文件格式，仅支持 PDF、Word(.docx)、Excel(.xlsx/.xls)、PPT(.pptx/.ppt)、常见图片(PNG/JPG/GIF/WEBP/BMP) 与设计源文件(PSD/AI/CDR 等)');
     selectedFile = null;
     if (fileInput) fileInput.value = '';
+    if (previewObjUrl) { URL.revokeObjectURL(previewObjUrl); previewObjUrl = null; }
     $('#fileinfo').style.display = 'none';
     return;
   }
@@ -1816,6 +1896,22 @@ function setFile(f) {
   const fpSize = $('#fpSize'); if (fpSize) fpSize.textContent = '0 MB / 0 MB';
   if (!$('#name').value) $('#name').value = f.name.replace(/\.[^.]+$/, '');
   applyRestrictionVisibility(detectKind(f));
+
+  // 创建页即时预览：图片/PDF 选完即用本地 objectURL 出缩略图 + 预览入口（文件尚未上传，走浏览器原生渲染）
+  if (previewObjUrl) { URL.revokeObjectURL(previewObjUrl); previewObjUrl = null; }
+  const kind = detectKind(f);
+  const canPreview = (kind === 'image' || kind === 'pdf');
+  const tbWrap = $('#fiThumbWrap'), tb = $('#fiThumb'), pv = $('#fiPreview'), icEl = $('#fiIc');
+  if (canPreview) {
+    previewObjUrl = URL.createObjectURL(f);
+    if (kind === 'image') { if (tb) tb.src = previewObjUrl; if (tbWrap) tbWrap.style.display = 'block'; if (icEl) icEl.style.display = 'none'; }
+    else { if (tbWrap) tbWrap.style.display = 'none'; if (icEl) icEl.style.display = ''; }
+    if (pv) pv.style.display = '';
+  } else {
+    if (tbWrap) tbWrap.style.display = 'none';
+    if (icEl) icEl.style.display = '';
+    if (pv) pv.style.display = 'none';
+  }
 }
 
 function detectKind(f) {
@@ -1883,8 +1979,39 @@ function syncWatermarkUI(prefix) {
   if (lbl) lbl.textContent = mode === 'dynamic' ? '水印前缀文字' : '水印文字';
   const hint = document.getElementById(prefix + 'Hint');
   if (hint) hint.textContent = !on
-    ? '未启用水印，预览与下载均不留痕'
+    ? ''
     : (mode === 'dynamic' ? '自动叠加访客 ID 与实时时间，可追溯来源' : '叠加在预览页面上，留空则不显示');
+}
+// 把 #rrggbb / rrggbb 归一化为 #rrggbb（非法返回 ''）
+function normHex(v) {
+  if (!v) return '';
+  v = v.trim();
+  if (v[0] !== '#') v = '#' + v;
+  return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : '';
+}
+// 颜色选择器与 hex 输入框双向同步
+function bindColorPair(colorEl, hexEl) {
+  if (!colorEl || !hexEl) return;
+  colorEl.addEventListener('input', () => { hexEl.value = colorEl.value; });
+  hexEl.addEventListener('input', () => {
+    const c = normHex(hexEl.value);
+    if (c) colorEl.value = c;
+  });
+}
+// 账号级白标（设置页）：读取品牌配置，全部留空返回 null（不写入 prefs）
+function readSettingBrand() {
+  const name = ($('#setBrandName') && $('#setBrandName').value || '').trim();
+  const logo = ($('#setBrandLogo') && $('#setBrandLogo').value || '').trim();
+  const color = ($('#setBrandColorHex') && $('#setBrandColorHex').value || '').trim();
+  const hidePowered = $('#setBrandHide') && $('#setBrandHide').checked;
+  if (!name && !logo && !color && !hidePowered) return null;
+  const b = {};
+  if (name) b.name = name;
+  if (logo) b.logo = logo;
+  const c = normHex(color);
+  if (c) b.color = c;
+  if (hidePowered) b.hidePowered = true;
+  return b;
 }
 // 生成可嵌入的控件 HTML（editShare 弹窗用）
 function watermarkWidgetHtml(prefix) {
@@ -1900,7 +2027,7 @@ function watermarkWidgetHtml(prefix) {
     </div>
     <label class="opt-row" id="${prefix}DlWrap">
       <input type="checkbox" id="${prefix}Dl" />
-      <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF / Word</span></span>
+      <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF</span></span>
     </label>
   </div>`;
 }
@@ -1974,12 +2101,40 @@ async function loadAndApplyPrefs() {
 window.applySharePrefs = applySharePrefs;
 
 const fiClear = document.getElementById('fiClear');
-if (fiClear) fiClear.addEventListener('click', (e) => { e.preventDefault(); selectedFile = null; if (fileInput) fileInput.value = ''; $('#fileinfo').style.display = 'none'; });
+if (fiClear) fiClear.addEventListener('click', (e) => {
+  e.preventDefault();
+  selectedFile = null;
+  if (fileInput) fileInput.value = '';
+  if (previewObjUrl) { URL.revokeObjectURL(previewObjUrl); previewObjUrl = null; }
+  const tbWrap = document.getElementById('fiThumbWrap');
+  if (tbWrap) tbWrap.style.display = 'none';
+  const pv = document.getElementById('fiPreview');
+  if (pv) pv.style.display = 'none';
+  $('#fileinfo').style.display = 'none';
+});
+// 创建页即时预览入口：缩略图 / 「预览」链接 → 用本地 objectURL 在弹窗里打开（图片/PDF 浏览器原生渲染）
+function openSelectedPreview() {
+  if (!selectedFile || !previewObjUrl) return;
+  openFilePreview(previewObjUrl, selectedFile.name);
+}
+const fiPreviewEl = document.getElementById('fiPreview');
+if (fiPreviewEl) fiPreviewEl.addEventListener('click', (e) => { e.preventDefault(); openSelectedPreview(); });
+const fiThumbWrapEl = document.getElementById('fiThumbWrap');
+if (fiThumbWrapEl) fiThumbWrapEl.addEventListener('click', (e) => { e.preventDefault(); openSelectedPreview(); });
 
 async function uploadAndShare() {
   if (!selectedFile) return toast('请先选择文件');
   if (!requireLogin()) return;
   if (!checkStore()) { toast('您尚未归属任何门店，无法创建分享，请联系管理员分配门店'); return; }
+  // 自定义有效期预校验：上传前拦截，避免传完大文件才发现时间非法；
+  // 也不允许过去的时间（以前会静默落成 null，变成永久有效）
+  const preChip = document.querySelector('#expireChips button.active, #expireCustomBtn.active');
+  if (preChip && preChip.dataset.val === 'custom') {
+    const pec = document.getElementById('expireCustom');
+    const pdt = pec && pec.value ? new Date(pec.value).getTime() : 0;
+    if (!pdt) { toast('请选择自定义过期时间'); return; }
+    if (pdt <= Date.now()) { toast('过期时间必须晚于当前时间'); return; }
+  }
   const btn = $('#shareBtn');
   const fp = $('#fileProgress'), fpBar = $('#fpBar'), fpPct = $('#fpPct'), fpSize = $('#fpSize');
   btn.disabled = true; btn.textContent = '上传中…';
@@ -1988,6 +2143,8 @@ async function uploadAndShare() {
   if (fpPct) fpPct.textContent = '0%';
   if (fpSize) fpSize.textContent = '0 MB / ' + fmtSize(selectedFile.size);
   const userToken = localStorage.getItem('userToken');
+  let uploadedFileId = null;   // 上传成功后记录，分享创建失败时兜底清理孤儿文件
+  let shareCreated = false;    // 分享创建成功后置位，避免误删已关联文件
   try {
     const upRes = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -2014,6 +2171,7 @@ async function uploadAndShare() {
       xhr.onabort = () => reject(new Error('上传已取消'));
       xhr.send(selectedFile);
     });
+    uploadedFileId = upRes.fileId || null;
 
     const activeChip = document.querySelector('#expireChips button.active, #expireCustomBtn.active');
     const val = activeChip ? activeChip.dataset.val : '7';
@@ -2023,7 +2181,9 @@ async function uploadAndShare() {
     } else if (val === 'custom') {
       const ec = $('#expireCustom');
       const dt = ec && ec.value ? new Date(ec.value).getTime() : 0;
-      expiresAt = dt > Date.now() ? dt : null;
+      // 上传耗时过长导致所选时间已过时直接报错，而不是静默变成永久有效
+      if (!dt || dt <= Date.now()) throw new Error('所选的自定义过期时间已过期，请重新选择后重试');
+      expiresAt = dt;
     } else {
       const days = parseInt(val, 10) || 0;
       if (days > 0) expiresAt = Date.now() + days * 86400000;
@@ -2041,7 +2201,20 @@ async function uploadAndShare() {
       maxViews: parseInt($('#maxViews').value, 10) || 0,
       durationSec: (parseInt($('#duration').value, 10) || 0) * 60,
       authMode: (document.querySelector('#authChips button.active') || { dataset: { val: 'open' } }).dataset.val,
-      watermark: readWatermark('wm'),
+      // 「防截图」实质是让水印层漂移，无水印时无效 → 自动补一个静态水印
+      watermark: (function () {
+        if ($('#rScreenshot').checked) {
+          const wmNow = readWatermark('wm');
+          if (!wmNow || wmNow.mode === 'none') {
+            const sr = document.querySelector('input[name="wmMode"][value="static"]');
+            if (sr) sr.checked = true;
+            const wt = document.getElementById('wmText');
+            if (wt && !wt.value.trim()) wt.value = '内部资料 严禁外传';
+            toast('「截图留痕」已自动开启水印（否则该选项无效）');
+          }
+        }
+        return readWatermark('wm');
+      })(),
       disableCopy: $('#rCopy').checked, disablePrint: $('#rPrint').checked,
       disableDownload: $('#rDownload').checked, disableScreenshot: $('#rScreenshot').checked,
       extra,
@@ -2053,6 +2226,7 @@ async function uploadAndShare() {
     });
     const shRes = await sh.json().catch(() => ({}));
     if (!sh.ok) throw new Error((shRes && shRes.message) || shRes.error || ('创建分享失败（HTTP ' + sh.status + '）'));
+    shareCreated = true;
 
     $('#qrImg').src = shRes.qr;
     $('#linkInput').value = location.origin + '/viewer.html?share=' + shRes.shareId;
@@ -2081,13 +2255,23 @@ async function uploadAndShare() {
     mineShares.unshift(newShare);
     panelLoaded.mine = true;
     renderMineGrid();
+    clearDraft();
 
     // 重置创建表单
     selectedFile = null; if (fileInput) fileInput.value = '';
+    if (previewObjUrl) { URL.revokeObjectURL(previewObjUrl); previewObjUrl = null; }
+    const tbWrap2 = document.getElementById('fiThumbWrap'); if (tbWrap2) tbWrap2.style.display = 'none';
+    const pv2 = document.getElementById('fiPreview'); if (pv2) pv2.style.display = 'none';
     $('#fileinfo').style.display = 'none';
     if (fp) fp.style.display = 'none';
   } catch (e) {
     toast('失败：' + e.message);
+    // 兜底清理：文件已传上但分享未建成时删除孤儿文件（best-effort，失败仅记日志）
+    if (uploadedFileId && !shareCreated && userToken) {
+      fetch('/api/files/' + uploadedFileId + '?userToken=' + encodeURIComponent(userToken), { method: 'DELETE' })
+        .then(r => { if (r.ok) console.log('[upload] 已清理未关联的孤儿文件：', uploadedFileId); })
+        .catch(() => {});
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = '立即分享';
@@ -2099,6 +2283,21 @@ async function uploadAndShare() {
 const shareBtn = document.getElementById('shareBtn');
 if (shareBtn) shareBtn.addEventListener('click', uploadAndShare);
 
+// 到期提示：精简成「9/27 10:34 到期」，才塞得进卡片标题行（原来一长串会把卡片撑高三行）
+function fmtExpHint(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ' 到期';
+}
+
+// 把时间戳转成 datetime-local 输入框用的本地时间字符串（YYYY-MM-DDTHH:mm）。
+// 不能用 toISOString()：它输出 UTC，datetime-local 按本地时区展示/解析，东八区会差 8 小时。
+function toLocalInputValue(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
 // 有效期：预设胶囊 + 始终可点的日期
 function setExpire(val, dateStr) {
   const chips = document.querySelectorAll('#expireChips button, #expireCustomBtn');
@@ -2106,31 +2305,38 @@ function setExpire(val, dateStr) {
   const ec = document.getElementById('expireCustom');
   const hint = document.getElementById('expireHint');
   const row = document.getElementById('expireCustomRow');
+  const cb = document.getElementById('expireCustomBtn');
   if (val === '0') {
-    // 永久：隐藏日期行，卡片不撑大
-    if (ec) { ec.value = ''; ec.disabled = true; }
-    if (row) row.style.display = 'none';
+    // 永久：只收起日期框，保留「自定义」按钮（否则选完永久就找不到入口改回来了）
+    if (ec) { ec.value = ''; ec.style.display = 'none'; ec.disabled = true; }
+    if (cb) cb.style.display = '';
+    if (row) row.style.display = 'flex';
+    if (hint) { hint.textContent = '永久有效'; hint.classList.remove('empty'); }
   } else if (val === 'custom') {
     if (row) row.style.display = 'flex';
+    if (cb) cb.style.display = '';
     if (ec) {
+      ec.style.display = '';
       ec.disabled = false;
       if (dateStr) ec.value = dateStr;
       else if (!ec.value) {
         const d = new Date(Date.now() + 7 * 86400000);
-        ec.value = d.toISOString().slice(0, 16);
+        ec.value = toLocalInputValue(d.getTime());
       }
     }
     if (hint && ec) {
       const dt = ec.value ? new Date(ec.value).getTime() : 0;
-      hint.textContent = dt > Date.now() ? ('将于 ' + new Date(ec.value).toLocaleString() + ' 到期') : '请选择自定义到期时间';
+      hint.textContent = dt > Date.now() ? fmtExpHint(dt) : '请选择时间';
       hint.classList.toggle('empty', !(dt > Date.now()));
     }
   } else {
+    // 预设天数：只显示"将于…到期"提示，隐藏自定义日期框（避免误导为可编辑）
+    if (cb) cb.style.display = '';
+    if (ec) { ec.style.display = 'none'; ec.disabled = true; }
     if (row) row.style.display = 'flex';
     const days = parseInt(val, 10);
     const d = new Date(Date.now() + days * 86400000);
-    if (ec) { ec.value = d.toISOString().slice(0, 16); ec.disabled = false; }
-    if (hint) { hint.textContent = '将于 ' + d.toLocaleString() + ' 到期'; hint.classList.remove('empty'); }
+    if (hint) { hint.textContent = fmtExpHint(d.getTime()); hint.classList.remove('empty'); }
   }
 }
 
@@ -2154,6 +2360,84 @@ function setExpire(val, dateStr) {
     chips.forEach(x => x.classList.toggle('active', x === b));
   }));
 })();
+// ========== 存为草稿（本地 localStorage，仅保存权限设置；文件需重选） ==========
+const DRAFT_KEY = 'safeShareDraft';
+function collectSettings() {
+  const activeChip = document.querySelector('#expireChips button.active, #expireCustomBtn.active');
+  const val = activeChip ? activeChip.dataset.val : '7';
+  let expireCustom = null;
+  if (val === 'custom') { const ec = document.getElementById('expireCustom'); expireCustom = ec && ec.value ? ec.value : null; }
+  const wmNode = document.querySelector('input[name="wmMode"]:checked');
+  return {
+    name: document.getElementById('name').value,
+    code: document.getElementById('code').value,
+    maxViewers: document.getElementById('maxViewers').value,
+    maxViews: document.getElementById('maxViews').value,
+    duration: document.getElementById('duration').value,
+    expire: val, expireCustom,
+    authMode: (document.querySelector('#authChips button.active') || { dataset: { val: 'open' } }).dataset.val,
+    rCopy: document.getElementById('rCopy').checked,
+    rPrint: document.getElementById('rPrint').checked,
+    rDownload: document.getElementById('rDownload').checked,
+    rScreenshot: document.getElementById('rScreenshot').checked,
+    antiForward: document.getElementById('antiForward').checked,
+    wmMode: wmNode ? wmNode.value : 'none',
+    wmText: document.getElementById('wmText').value,
+    wmDl: document.getElementById('wmDl').checked,
+    previewEnabled: document.getElementById('previewEnabled').checked,
+    previewPages: document.getElementById('previewPages').value,
+    protectPassword: document.getElementById('protectPassword').value
+  };
+}
+function applySettings(s) {
+  if (!s) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  set('name', s.name); set('code', s.code);
+  set('maxViewers', s.maxViewers); set('maxViews', s.maxViews); set('duration', s.duration);
+  set('wmText', s.wmText); set('previewPages', s.previewPages); set('protectPassword', s.protectPassword);
+  setChk('rCopy', s.rCopy); setChk('rPrint', s.rPrint); setChk('rDownload', s.rDownload);
+  setChk('rScreenshot', s.rScreenshot); setChk('antiForward', s.antiForward);
+  setChk('wmDl', s.wmDl); setChk('previewEnabled', s.previewEnabled);
+  if (s.wmMode) { const r = document.querySelector('input[name="wmMode"][value="' + s.wmMode + '"]'); if (r) r.checked = true; }
+  if (s.authMode) document.querySelectorAll('#authChips button').forEach(b => b.classList.toggle('active', b.dataset.val === s.authMode));
+  if (s.expire) setExpire(s.expire, s.expireCustom || null);
+  const pe = document.getElementById('previewEnabled');
+  if (pe) pe.dispatchEvent(new Event('change'));
+}
+function saveDraft() {
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(collectSettings())); toast('已存为草稿，下次选择文件后会自动套用这些权限设置'); }
+  catch (e) { toast('草稿保存失败'); }
+}
+function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch (e) {} }
+function restoreDraft() {
+  try { const raw = localStorage.getItem(DRAFT_KEY); if (raw) { applySettings(JSON.parse(raw)); toast('已恢复上次草稿设置'); } } catch (e) {}
+}
+const draftBtn = document.getElementById('draftBtn');
+if (draftBtn) draftBtn.addEventListener('click', saveDraft);
+// A2：随机生成访问码（4 位，匹配占位提示「如：8888」）
+const genCodeBtn = document.getElementById('genCode');
+if (genCodeBtn) genCodeBtn.addEventListener('click', () => {
+  const n = Math.floor(1000 + Math.random() * 9000);
+  const el = document.getElementById('code');
+  if (el) el.value = String(n);
+});
+restoreDraft();
+
+// P0-2 高级设置折叠：仅移动端生效（桌面端由 CSS display:contents 展开、摘要已隐藏）
+const advSumEl = document.querySelector('.create-shell .adv-sum');
+const advWrapEl = document.getElementById('advCollapse');
+if (advSumEl && advWrapEl) {
+  const toggleAdv = () => {
+    const open = advWrapEl.classList.toggle('adv-open');
+    advSumEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  advSumEl.addEventListener('click', toggleAdv);
+  advSumEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleAdv(); }
+  });
+}
+
 const previewEnabled = document.getElementById('previewEnabled');
 if (previewEnabled) {
   const syncPreviewFields = () => {
@@ -2166,7 +2450,7 @@ if (previewEnabled) {
   syncPreviewFields();
 }
 const copyLinkBtn = document.getElementById('copyLink');
-if (copyLinkBtn) copyLinkBtn.addEventListener('click', () => { navigator.clipboard.writeText($('#linkInput').value); toast('链接已复制'); });
+if (copyLinkBtn) copyLinkBtn.addEventListener('click', () => { copyText($('#linkInput').value).then(() => toast('链接已复制')).catch(() => toast('复制失败，请手动复制')); });
 function closeResult() { $('#result').classList.remove('show'); }
 const closeResultBtn = document.getElementById('closeResult');
 if (closeResultBtn) closeResultBtn.addEventListener('click', closeResult);
@@ -2192,6 +2476,16 @@ function initSettings() {
     bindToggle('setOldToggle', 'setOldPw');
     bindToggle('setNewToggle', 'setNewPw');
     const sb = $('#setSave'); if (sb) sb.onclick = saveSettings;
+    // 修改密码：独立弹窗，不再混在「保存设置」里（避免改昵称时误触改密）
+    const pb = $('#setPwdBtn'); if (pb) pb.onclick = openPwdModal;
+    const pc = $('#pwdClose'); if (pc) pc.onclick = closePwdModal;
+    const pcan = $('#pwdCancel'); if (pcan) pcan.onclick = closePwdModal;
+    const ps = $('#pwdSave'); if (ps) ps.onclick = changePassword;
+    // 设置页白标：主题色选择器与 hex 输入双向同步
+    bindColorPair($('#setBrandColor'), $('#setBrandColorHex'));
+    const pm = $('#pwdModal');
+    if (pm) pm.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); changePassword(); } });
+    if (pm) pm.addEventListener('click', (e) => { if (e.target === pm) closePwdModal(); });
     const cc = $('#setClearCache');
     if (cc) cc.onclick = () => {
       try { localStorage.removeItem('sharePrefs'); ['sb-token', 'supabase.auth.token'].forEach(k => localStorage.removeItem(k)); sessionStorage.clear(); } catch (e) {}
@@ -2224,7 +2518,7 @@ async function loadSettings() {
     $('#setRealName').value = d.realName || '';
     const orgSec = $('#setOrgSec');
     if (orgSec) { $('#setOrg').value = d.orgName || '—'; orgSec.style.display = d.orgName ? 'block' : 'none'; }
-    const DEFAULT_PREFS = { expire: '7', watermark: { mode: 'none', text: '', dl: false }, copy: true, print: true, download: true, accessCode: '', authMode: 'open', maxViewers: 0, maxViews: 0, duration: 0, screenshot: false, antiForward: false, previewPages: 0, protectPassword: '' };
+    const DEFAULT_PREFS = { expire: '7', watermark: { mode: 'none', text: '', dl: false }, copy: true, print: true, download: true, accessCode: '', authMode: 'open', maxViewers: 0, maxViews: 0, duration: 0, screenshot: false, antiForward: false, previewPages: 0, protectPassword: '', brand: null };
     const p = Object.assign({}, DEFAULT_PREFS, d.prefs || {});
     $('#setExpire').value = String(p.expire);
     $('#setAuthMode').value = p.authMode || 'open';
@@ -2234,45 +2528,78 @@ async function loadSettings() {
     $('#setMaxViews').value = toNum(p.maxViews);
     $('#setDuration').value = toNum(p.duration);
     $('#setPreviewPages').value = toNum(p.previewPages);
+    // 之前漏了回填「后续内容密码」：保存过一次后再进设置页，这个框显示为空，
+    // 用户点一次「保存设置」就会把已设的密码静默清掉。此处补齐回填。
+    const spw = $('#setProtectPassword'); if (spw) spw.value = p.protectPassword || '';
     $('#setCopy').checked = !!p.copy;
     $('#setPrint').checked = !!p.print;
     $('#setDownload').checked = !!p.download;
     $('#setScreenshot').checked = !!p.screenshot;
     const setAf = $('#setAntiForward'); if (setAf) setAf.checked = !!p.antiForward;
+    // 账号级白标：回填品牌字段（未设置时不显示、保持默认「安阅」外观）
+    const brand = p.brand || {};
+    $('#setBrandName').value = brand.name || '';
+    $('#setBrandLogo').value = brand.logo || '';
+    const bColor = normHex(brand.color) || '#4f6ef2';
+    $('#setBrandColor').value = bColor;
+    $('#setBrandColorHex').value = bColor;
+    $('#setBrandHide').checked = !!brand.hidePowered;
     $('#setOldPw').value = ''; $('#setNewPw').value = ''; $('#setNewPw2').value = '';
     if (typeof window.afterLogin === 'function') window.afterLogin(d.realName || d.email);
   } catch (e) {
     const msg = $('#setMsg'); if (msg) msg.textContent = '读取资料失败，请刷新重试';
   }
 }
+// ---------- 修改密码（独立弹窗） ----------
+function openPwdModal() {
+  ['setOldPw', 'setNewPw', 'setNewPw2'].forEach(id => { const el = document.getElementById(id); if (el) { el.value = ''; el.type = 'password'; } });
+  const t1 = document.getElementById('setOldToggle'); if (t1) t1.textContent = '👁️';
+  const t2 = document.getElementById('setNewToggle'); if (t2) t2.textContent = '👁️';
+  const m = $('#pwdMsg'); if (m) { m.textContent = ''; m.style.color = ''; }
+  const modal = $('#pwdModal'); if (!modal) return;
+  modal.classList.add('show');
+  const first = $('#setOldPw'); if (first) setTimeout(() => first.focus(), 30);
+}
+function closePwdModal() { const m = $('#pwdModal'); if (m) m.classList.remove('show'); }
+async function changePassword() {
+  const tk = localStorage.getItem('userToken');
+  const msg = $('#pwdMsg'), btn = $('#pwdSave');
+  const oldPw = $('#setOldPw').value, newPw = $('#setNewPw').value, newPw2 = $('#setNewPw2').value;
+  const fail = (t) => { msg.style.color = '#e5484d'; msg.textContent = t; };
+  if (!oldPw || !newPw || !newPw2) return fail('请填写原密码、新密码与确认新密码');
+  if (newPw !== newPw2) return fail('两次输入的新密码不一致');
+  if (newPw === oldPw) return fail('新密码不能与原密码相同');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/auth/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userToken: tk, oldPassword: oldPw, newPassword: newPw }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { fail(d.message || d.error || '修改失败，请检查原密码'); return; }
+    closePwdModal();
+    toast('密码已修改，其它设备已退出登录');
+  } catch (e) { fail('网络错误，请重试'); }
+  finally { btn.disabled = false; }
+}
 async function saveSettings() {
   const tk = localStorage.getItem('userToken');
   const msg = $('#setMsg');
   const realName = $('#setRealName').value.trim();
   if (!realName) { msg.textContent = '真实姓名不能为空'; return; }
-  const oldPw = $('#setOldPw').value, newPw = $('#setNewPw').value, newPw2 = $('#setNewPw2').value;
-  if ((oldPw || newPw || newPw2) && (!oldPw || !newPw || !newPw2)) { msg.textContent = '修改密码需填原密码、新密码、确认新密码三项'; return; }
-  if (newPw && newPw !== newPw2) { msg.textContent = '两次输入的新密码不一致'; return; }
   const prefs = {
     expire: $('#setExpire').value, authMode: $('#setAuthMode').value, accessCode: $('#setCode').value.trim(),
     watermark: readWatermark('setWm'), maxViewers: toNum($('#setMaxViewers').value), maxViews: toNum($('#setMaxViews').value),
     duration: toNum($('#setDuration').value), previewPages: toNum($('#setPreviewPages').value), protectPassword: $('#setProtectPassword').value.trim(),
-    copy: $('#setCopy').checked, print: $('#setPrint').checked, download: $('#setDownload').checked, screenshot: $('#setScreenshot').checked, antiForward: $('#setAntiForward').checked
+    copy: $('#setCopy').checked, print: $('#setPrint').checked, download: $('#setDownload').checked, screenshot: $('#setScreenshot').checked, antiForward: $('#setAntiForward').checked,
+    brand: readSettingBrand()
   };
   const btn = $('#setSave'); btn.disabled = true;
   try {
     const pr = await fetch('/api/auth/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userToken: tk, realName, prefs }) });
     const pd = await pr.json().catch(() => ({}));
     if (!pr.ok) { msg.textContent = pd.message || pd.error || '保存失败'; btn.disabled = false; return; }
-    if (newPw) {
-      const cp = await fetch('/api/auth/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userToken: tk, oldPassword: oldPw, newPassword: newPw }) });
-      const cd = await cp.json().catch(() => ({}));
-      if (!cp.ok) { msg.textContent = cd.message || cd.error || '修改密码失败'; btn.disabled = false; return; }
-    }
     try { localStorage.setItem('sharePrefs', JSON.stringify(prefs)); } catch (e) {}
     if (typeof window.applySharePrefs === 'function') window.applySharePrefs();
     msg.style.color = '#16a34a';
-    msg.textContent = '已保存' + (newPw ? '（密码已修改，其它设备已退出）' : '');
+    msg.textContent = '已保存';
     setTimeout(() => { msg.style.color = '#e5484d'; msg.textContent = ''; }, 2200);
     loadSettings();
   } catch (e) { msg.textContent = '网络错误，请重试'; }

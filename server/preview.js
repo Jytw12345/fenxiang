@@ -37,13 +37,35 @@ function defaultManagedPython() {
   return path.join(home, '.workbuddy', 'binaries', 'python', 'envs', 'default', 'bin', 'python');
 }
 
+// 在 PATH 中查找可执行文件。
+// 注意：先走纯 Node 的 PATH 扫描，不依赖外部命令——精简镜像（debian-slim）里 which 不一定有，
+// 而旧实现用的 `where ... 2>nul` 是 Windows 命令，在 Linux 上必然失败，导致容器里明明装了
+// soffice/inkscape 也探测不到（表现为 PPT 预览误报「服务器未安装转换组件」）。
 function locateOnPath(name) {
+  const isWin = process.platform === 'win32';
+  const exts = isWin ? String(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
+  const dirs = String(process.env.PATH || '').split(isWin ? ';' : ':');
+  for (const dir of dirs) {
+    const d = dir.replace(/^"|"$/g, '');
+    if (!d) continue;
+    for (const ext of exts) {
+      const p = path.join(d, name + ext);
+      try { if (fs.existsSync(p) && fs.statSync(p).isFile()) return p; } catch (e) {}
+    }
+  }
+  // 兜底：系统查找命令（PATH 之外或 shim 场景）
   try {
-    const cmd = process.platform === 'win32' ? `where ${name} 2>nul` : `which ${name} 2>/dev/null`;
+    const cmd = isWin ? `where ${name} 2>nul` : `which ${name} 2>/dev/null`;
     const out = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 })
       .toString().trim().split(/\r?\n/)[0];
     return (out && fs.existsSync(out)) ? out : null;
   } catch (e) { return null; }
+}
+
+// 返回第一个存在的绝对路径（常见安装位置兜底）
+function firstExisting(list) {
+  for (const p of list) { try { if (p && fs.existsSync(p)) return p; } catch (e) {} }
+  return null;
 }
 
 function detectPython() {
@@ -66,18 +88,17 @@ function detectPython() {
 
 function detectTools() {
   if (_tools) return _tools;
-  const detect = (c) => {
-    try {
-      const out = execSync(`where ${c} 2>nul`, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 })
-        .toString().trim().split(/\r?\n/)[0];
-      return (out && fs.existsSync(out)) ? out : null;
-    } catch (e) { return null; }
-  };
   _tools = {
-    magick: detect('magick'),                                   // ImageMagick 7（切勿用 convert，Windows 下是磁盘工具）
-    gs: detect('gswin64c') || detect('gs'),                     // Ghostscript
-    inkscape: detect('inkscape'),                               // Inkscape（libcdr/librsvg）
-    soffice: detect('soffice') || detect('libreoffice')         // LibreOffice（兜底，适合 office/向量转图）
+    magick: locateOnPath('magick'),                             // ImageMagick 7（切勿用 convert，Windows 下是磁盘工具）
+    gs: locateOnPath('gswin64c') || locateOnPath('gs'),         // Ghostscript
+    inkscape: locateOnPath('inkscape'),                         // Inkscape（libcdr/librsvg）
+    // LibreOffice（兜底，适合 office/向量转图）；再兜常见安装位置，防 PATH 未包含
+    soffice: locateOnPath('soffice') || locateOnPath('libreoffice') || firstExisting([
+      '/usr/bin/soffice', '/usr/local/bin/soffice', '/usr/lib/libreoffice/program/soffice',
+      '/opt/libreoffice/program/soffice',
+      'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+      'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe'
+    ])
   };
   return _tools;
 }
@@ -151,10 +172,17 @@ async function generateSlidePdf(ext, buf) {
   const tmp = os.tmpdir();
   const id = crypto.randomBytes(8).toString('hex');
   const inPath = path.join(tmp, `slide_in_${id}${ext}`);
+  // 每次转换用独立的 LibreOffice 用户配置目录：容器内 HOME 可能不可写，且并发调用共用
+  // 同一 profile 时第二个实例会因 profile 锁直接失败。
+  const profile = path.join(tmp, `lo_profile_${id}`);
   try {
     fs.writeFileSync(inPath, buf);
     // soffice 输出文件名 = 输入文件名换 .pdf（--outdir 控制目录）
-    const code = await run(tools.soffice, ['--headless', '--norestore', '--convert-to', 'pdf', '--outdir', tmp, inPath], SLIDE_TIMEOUT);
+    const code = await run(tools.soffice, [
+      '--headless', '--norestore', '--nologo', '--nolockcheck',
+      '-env:UserInstallation=file://' + profile,
+      '--convert-to', 'pdf', '--outdir', tmp, inPath
+    ], SLIDE_TIMEOUT);
     const outPath = inPath.slice(0, -ext.length) + '.pdf';
     if (code === 0 && fs.existsSync(outPath)) {
       const out = fs.readFileSync(outPath);
@@ -166,6 +194,7 @@ async function generateSlidePdf(ext, buf) {
     return { ok: false, reason: String(e && e.message) };
   } finally {
     try { fs.unlinkSync(inPath); } catch (e) {}
+    try { fs.rmSync(profile, { recursive: true, force: true }); } catch (e) {}
   }
 }
 

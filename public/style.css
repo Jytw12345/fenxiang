@@ -1,6 +1,6 @@
 :root{
   --bg:#f5f7fb; --panel:#ffffff; --ink:#1f2937; --muted:#6b7280;
-  --brand:#4f6ef2; --brand-d:#3b56d6; --brand-l:#7c93ff;
+  --brand:#4f6ef2; --brand-d:#3b56d6; --brand-l:#7c93ff; --brand-xl:#eef1ff;
   --line:#eceef3; --line2:#f2f4f8; --danger:#ef4444; --ok:#16a34a;
   --shadow:0 6px 20px rgba(31,41,55,.06);
   --shadow-sm:0 3px 12px rgba(31,41,55,.04);
@@ -44,11 +44,15 @@ a{color:var(--brand);text-decoration:none;}
 .drop:hover{border-color:var(--brand-l);background:linear-gradient(180deg,#f3f7ff,#e9f0ff);}
 .drop.hot{border-color:var(--brand);background:linear-gradient(180deg,#eef3ff,#dde7ff);color:var(--brand);}
 .file-pill{display:none;align-items:center;gap:10px;padding:10px 12px;background:#f3f6ff;border:1px solid #e0e7ff;border-radius:11px;}
-.file-pill .ic{font-size:24px;}
+.file-pill .ic{font-size:24px;flex:0 0 auto;}
+.file-pill .fi-thumb{flex:0 0 auto;width:42px;height:42px;border-radius:8px;overflow:hidden;border:1px solid #e0e7ff;background:#fff;display:none;}
+.file-pill .fi-thumb img{width:100%;height:100%;object-fit:cover;display:block;}
 .file-pill .file-meta{flex:1;min-width:0;}
 .file-pill .nm{font-weight:600;font-size:14px;}
 .file-pill .sz{color:var(--muted);font-size:12px;}
-.file-pill a{margin-left:auto;color:var(--danger);font-size:13px;}
+.file-pill .file-acts{margin-left:auto;display:flex;align-items:center;gap:14px;flex:0 0 auto;}
+.file-pill .file-acts a{color:var(--brand);font-size:13px;text-decoration:none;white-space:nowrap;}
+.file-pill .file-acts a#fiClear{color:var(--danger);}
 
 /* ===== 设置区（2 列平衡网格） ===== */
 .sec-title{font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.6px;margin:14px 0 8px;text-transform:uppercase;}
@@ -73,12 +77,12 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .exp-bar .exp-chips button{appearance:none;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:11.5px;padding:5px 10px;border-radius:999px;cursor:pointer;transition:.15s;font-family:inherit;white-space:nowrap;}
 .exp-bar .exp-chips button:hover{border-color:#cdd6f5;}
 .exp-bar .exp-chips button.active{border-color:var(--brand);background:var(--brand);color:#fff;font-weight:600;box-shadow:0 2px 6px rgba(79,110,242,.25);}
-.exp-bar input[type="datetime-local"]{flex:0 0 auto;width:190px;padding:6px 8px;font-size:12.5px;}
+.exp-bar input[type="datetime-local"]{flex:1 1 auto;width:auto;min-width:0;max-width:190px;padding:6px 8px;font-size:12.5px;}
 .exp-bar input[type="datetime-local"]:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allowed;opacity:.7;}
 .exp-bar .hint{flex:1 1 auto;font-size:11.5px;color:var(--muted);min-width:0;}
 .exp-bar .hint.empty{color:#9aa2b8;}
-/* 第二行：自定义胶囊 + 日期框 + 提示 */
-.exp-custom-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;}
+/* 第二行：自定义胶囊 + 日期框（恒定一行，与预设状态同高） */
+.exp-custom-row{display:flex;flex-wrap:nowrap;align-items:center;gap:6px;width:100%;}
 .exp-custom-row button{appearance:none;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:11.5px;padding:5px 10px;border-radius:999px;cursor:pointer;transition:.15s;font-family:inherit;white-space:nowrap;}
 .exp-custom-row button:hover{border-color:#cdd6f5;}
 .exp-custom-row button.active{border-color:var(--brand);background:var(--brand);color:#fff;font-weight:600;box-shadow:0 2px 6px rgba(79,110,242,.25);}
@@ -111,11 +115,54 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .tile-hd .ic{width:24px;height:24px;border-radius:7px;background:#eef1ff;color:var(--brand);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;}
 .tile-hd .ttl{white-space:nowrap;flex-shrink:0;letter-spacing:.2px;}
 .tile-hd small{color:var(--muted);font-weight:400;font-size:10.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* 有效期卡的到期提示：贴卡片标题行右侧（不占卡内行，避免切"自定义"时卡片变高） */
+.tile-hd small.hint{margin-left:auto;}
 .tile-bd{display:flex;flex-direction:column;gap:9px;}
 .tile-bd .pfield{margin-bottom:0;}
 .tile .wm-textwrap{display:flex;flex-direction:column;gap:4px;}
 .tile .wm-textwrap input{font-size:12px;padding:6px 9px;border-radius:8px;}
 .tile .wm-textwrap .wm-hint{margin-top:0;}
+
+/* 创建分享页（仅桌面）：紧凑分栏，7 张卡压成 2 行、行内等高对齐、总高约减半；
+   手机/窄屏沿用下方原有单列样式，不受影响 */
+@media (min-width:769px){
+.create-shell .tiles{grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:10px;}
+.create-shell .tiles .tile{padding:10px 12px;gap:6px;}
+.create-shell .tiles .tile-hd{font-size:12px;gap:6px;}
+.create-shell .tiles .tile-hd .ic{width:21px;height:21px;font-size:12px;border-radius:6px;}
+.create-shell .tiles .tile-bd{gap:7px;}
+.create-shell .tiles .tiny-label{font-size:10px;}
+.create-shell .tiles .pfield > label{font-size:11px;margin-bottom:3px;}
+.create-shell .tiles .pfield > label small{font-size:10px;margin-left:3px;}
+.create-shell .tiles .chips{gap:5px;}
+.create-shell .tiles .chips label{padding:4px 6px;}
+.create-shell .tiles .opt-row{padding:6px 9px;gap:7px;border-radius:8px;}
+.create-shell .tiles .auth-chips{gap:6px;}
+.create-shell .tiles .auth-chips button{min-width:0;flex:1 1 0;padding:6px 10px;border-radius:9px;}
+.create-shell .tiles .exp-bar .exp-chips{gap:3px;}
+.create-shell .tiles .exp-bar .exp-chips button,
+.create-shell .tiles .exp-custom-row button{padding:4px 6px;font-size:10.5px;}
+.create-shell .tiles .exp-custom-row input[type="datetime-local"]{padding:4px 6px;font-size:11px;}
+.create-shell .tiles .tile-hd small.hint{font-size:10.5px;}
+.create-shell .tiles .exp-bar .hint{font-size:10.5px;}
+.create-shell .tiles .wm-hint{font-size:10px;margin-top:2px;}
+.create-shell .tiles .tile .wm-textwrap input{font-size:11.5px;padding:5px 8px;}
+/* 文件与访问码：占两格，文件名 : 访问码 ≈ 1.7 : 1（文件名约 305px / 访问码约 179px，长文件名看全、访问码不被挤） */
+.create-shell .tile-perms .tile-bd{display:grid;grid-template-columns:1.7fr 1fr;gap:6px 12px;}
+/* 预览限制：收到一格宽，两字段等宽自适应（不再是固定 84px） */
+.create-shell .tile-preview .triple-row.sec-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+.create-shell .tile-preview .triple-row.sec-grid input{width:100%;}
+/* 访问限制：三格等宽，输入框自适应，永不被卡片裁切 */
+.create-shell .tile-limits .triple-row.sec-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}
+.create-shell .tile-limits .triple-row.sec-grid input{width:100%;}
+/* 末行尾卡占两格：填满 4 列网格的尾槽，不留空缺 */
+.create-shell .tiles .tile-span2{grid-column:span 2;}
+/* 高级设置：桌面端透明展开 —— 外层 div 与内层网格都折叠为 contents，7 张卡并入同一 4 列网格。
+   注意：必须用 div 而不是 details，Chromium 忽略 details 上的 display:contents(会退化为块级，5 张卡挤成一列)。 */
+.create-shell .adv-collapse,
+.create-shell .adv-tiles{display:contents;}
+.create-shell .adv-collapse > .adv-sum{display:none;}
+}
 /* 选项行：勾选框 + 主文案（+ 次说明），说明独占一行不挤压主体 */
 .opt-row{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;cursor:pointer;user-select:none;transition:.15s;}
 .opt-row:hover{border-color:#cdd6f5;}
@@ -130,6 +177,13 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .opt-row.is-off:has(>input:checked){border-color:var(--line);background:#fff;}
 /* 短内容字段：按内容宽度，不拉满整行 */
 #code{max-width:170px;}
+/* 创建分享页「文件与访问码」占两格后，两个字段等宽对齐，不再各自留白 */
+.create-shell .tile-perms #code{max-width:none;}
+/* A2：访问码输入框 + 随机按钮同行；文件名 : 访问码 ≈ 1.7 : 1 由外层网格控制 */
+.create-shell .tile-perms .inp-row{display:flex;align-items:center;gap:6px;}
+.create-shell .tile-perms .inp-row #code{flex:1 1 auto;min-width:0;width:100%;max-width:none;}
+.create-shell .tile-perms .mini-btn{flex:0 0 auto;width:32px;height:32px;padding:0;border:1px solid var(--line);background:#fff;border-radius:8px;font-size:14px;line-height:1;color:var(--brand);cursor:pointer;transition:.15s;}
+.create-shell .tile-perms .mini-btn:hover{border-color:var(--brand);background:#eef1ff;}
 
 /* ===== 创建分享：权限区单张紧凑卡（内部分段） ===== */
 .pcard{border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--shadow-sm);padding:14px 18px;}
@@ -142,8 +196,8 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .pcard .pgrid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;margin-bottom:4px;}
 .pcard .pgrid2.sec-grid{margin-bottom:4px;}
 .pcard .pgrid2.base-row{grid-template-columns:2fr 1fr;}
-.triple-row.sec-grid{display:grid;grid-template-columns:repeat(3,auto);gap:12px 16px;margin-bottom:0;justify-content:start;}
-.triple-row.sec-grid>div{display:flex;flex-direction:column;}
+.triple-row.sec-grid{display:grid;grid-template-columns:repeat(3,minmax(0,max-content));gap:12px;margin-bottom:0;justify-content:start;}
+.triple-row.sec-grid>div{display:flex;flex-direction:column;min-width:0;}
 .triple-row.sec-grid input{width:84px;text-align:center;padding:6px 4px;font-size:12.5px;}
 
 .pfield{margin-bottom:6px;}
@@ -153,8 +207,14 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .pdivider{height:1px;background:var(--line2);margin:8px 0;}
 input::placeholder,textarea::placeholder{color:#9aa2b8;}
 
+/* 白标设置：主题色 color 选择器 + hex 输入框同行 */
+.wb-color-row{display:flex;align-items:center;gap:8px;}
+.wb-color-row > label{white-space:nowrap;color:#374151;font-weight:600;font-size:11.5px;}
+.wb-color-row input[type=color]{width:40px;height:34px;padding:2px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;flex:0 0 auto;}
+.wb-hex{flex:1 1 auto;min-width:0;}
+
 /* 访问限制窄输入 */
-.tiny-label{font-size:10.5px;color:#374151;margin-bottom:3px;font-weight:500;white-space:nowrap;text-align:center;}
+.tiny-label{font-size:10.5px;color:#374151;margin-bottom:3px;font-weight:500;white-space:nowrap;text-align:center;max-width:100%;overflow:hidden;text-overflow:ellipsis;}
 .tiny-label small{color:var(--muted);font-weight:400;margin-left:3px;}
 
 /* 防盗用开关 */
@@ -170,7 +230,6 @@ input::placeholder,textarea::placeholder{color:#9aa2b8;}
 .chips.wm-types input{position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;}
 .wm-widget{display:flex;flex-direction:column;gap:8px;}
 .wm-hint{display:block;color:var(--muted);font-size:10.5px;margin-top:3px;line-height:1.45;}
-.frow-wm{align-items:flex-start;}
 
 /* 预览限制：选项行（.opt-row）+ 字段网格，不再使用内联长句 */
 
@@ -345,6 +404,8 @@ table.vt tr:hover td{background:#fafbff;}
 .row-menu{position:relative;display:inline-block;}
 .menu-list{display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:30;min-width:132px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-sm);padding:6px;flex-direction:column;}
 .menu-list.open{display:flex;}
+/* 卡片贴近视口底部时向上展开（具体由 toggleRowMenu 判定），避免菜单被底部裁掉看不见 */
+.menu-list.up{top:auto;bottom:calc(100% + 4px);}
 .menu-list button{display:block;width:100%;text-align:left;background:none;border:none;padding:8px 10px;border-radius:8px;font-size:13px;color:var(--ink);cursor:pointer;}
 .menu-list button:hover{background:var(--bg);}
 .menu-list button.danger{color:var(--danger);}
@@ -519,12 +580,14 @@ th{color:var(--muted);font-weight:600;}
 .set-head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:6px;}
 .set-head .page-title{font-size:16px;margin:0 0 2px;}
 .set-head .page-sub{font-size:11.5px;color:var(--muted);margin:0;}
-.set-cards{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start;}
+.set-cards{display:grid;grid-template-columns:1fr;gap:8px;align-items:start;}
 .scard{border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow-sm);padding:9px 10px;}
 .scard.span2{grid-column:1 / -1;}
 .scard > h3{margin:0 0 6px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:5px;}
 .scard > h3 small{font-weight:400;color:var(--muted);font-size:10.5px;}
 .scard > h3::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--brand);flex:0 0 auto;}
+/* 卡片标题右侧的小按钮（如「修改密码」），靠右对齐，不参与标题文字流 */
+.scard > h3 .h3-act{margin-left:auto;font-size:11px;height:24px;padding:0 10px;line-height:1;flex:0 0 auto;}
 .frow{margin-bottom:5px;}
 .frow:last-child{margin-bottom:0;}
 .frow > label{display:block;font-size:10.5px;font-weight:600;color:#4b5563;margin-bottom:3px;}
@@ -533,8 +596,18 @@ select.inp{padding-right:4px;}
 .inp::placeholder{color:#9aa3b2;}
 .inp:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 2px rgba(91,115,255,.13);}
 .inp[readonly]{background:var(--bg,#f5f6f8);color:var(--muted);cursor:default;}
-.grid2{display:grid;grid-template-columns:repeat(4, 1fr);gap:5px 8px;}
-.grid2 .frow{margin-bottom:0;}
+/* 账号信息：4 个字段横排，读起来一行一个概念，不再挤成竖排大列表 */
+.acct-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px 8px;}
+.acct-grid .frow{margin-bottom:0;}
+/* 默认分享参数：三个带小标题的分组（访问控制 / 水印 / 访问限制），组内紧凑、组间留白 */
+.pref-grid{display:grid;grid-template-columns:1fr 1fr 1.15fr;gap:8px;align-items:stretch;}
+.pf-box{border:1px solid var(--line);border-radius:9px;background:#fbfcff;padding:8px 9px;min-width:0;}
+.pf-hd{display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;color:#4b5563;margin-bottom:6px;}
+.pf-hd small{font-weight:400;color:var(--muted);font-size:10px;}
+.pf-hd::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--brand);flex:0 0 auto;}
+.limit-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 8px;}
+.limit-grid .frow{margin-bottom:0;}
+.limit-grid .frow.spanl{grid-column:1 / -1;}
 .pw{position:relative;}
 .pw .inp{padding-right:28px;}
 /* 作用域限定在设置页的 .pw 内：原来这条全局 .pw-toggle 会盖掉登录弹窗的图标尺寸/透明度 */
@@ -549,13 +622,26 @@ select.inp{padding-right:4px;}
 .set-foot{display:flex;align-items:center;gap:8px;margin-top:8px;}
 .set-foot .form-msg{flex:1;margin:0;}
 @media (max-width:900px){
-  .grid2{grid-template-columns:1fr 1fr;}
+  .acct-grid{grid-template-columns:1fr 1fr;}
+  .pref-grid{grid-template-columns:1fr 1fr;}
 }
 @media (max-width:680px){
   .set-cards{grid-template-columns:1fr;}
   .set-wrap{padding:10px 12px 36px;}
-  .grid2{grid-template-columns:1fr;}
+  .acct-grid,.pref-grid,.limit-grid{grid-template-columns:1fr;}
 }
+
+/* 品牌设置（白标）：与默认分享参数同风格，2 列紧凑排布 */
+.brand-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 8px;align-items:center;}
+.brand-grid .frow{margin-bottom:0;}
+.brand-grid .frow.brand-color{grid-column:1 / -1;display:flex;align-items:center;gap:8px;}
+.brand-grid .frow.brand-color > label{flex:0 0 auto;width:auto;margin-bottom:0;}
+.brand-grid .brand-color input[type="color"]{width:38px;height:30px;padding:2px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;flex:0 0 auto;}
+.brand-grid .brand-color .wb-hex{flex:1 1 auto;min-width:0;}
+.set-brand-hide{grid-column:1 / -1;display:flex;align-items:center;gap:5px;font-size:11px;padding:5px 9px;border:1px solid var(--line);border-radius:999px;cursor:pointer;background:#fff;color:var(--ink);user-select:none;transition:.15s;}
+.set-brand-hide:has(input:checked){border-color:var(--brand);background:#eef1ff;color:var(--brand);font-weight:600;}
+.set-brand-hide input{width:auto;accent-color:var(--brand);}
+.set-hint{font-size:10.5px;color:var(--muted);margin:6px 0 0;line-height:1.5;}
 
 /* ===== 日志筛选条 ===== */
 .audit-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px;box-shadow:var(--shadow-sm);}
@@ -620,6 +706,15 @@ select.inp{padding-right:4px;}
 .eprev .prow input[type="number"]{width:54px;flex:0 0 auto;text-align:center;}
 .eprev .prow input[type="text"]{width:auto;flex:1 1 60px;min-width:64px;}
 .eprev.off .pbody{opacity:.45;pointer-events:none;}
+/* 白标设置区块（编辑弹窗）：复用 .prow 排版，颜色行内放 color 选择器 + hex 输入 */
+.edit-brand{display:flex;flex-direction:column;gap:8px;border:1px solid var(--line);background:#f9fafc;border-radius:8px;padding:7px 11px;}
+.edit-brand .prow{display:flex;align-items:center;gap:8px;min-width:0;font-size:12.5px;color:#374151;}
+.edit-brand .prow>span{flex:0 0 auto;white-space:nowrap;}
+.edit-brand .prow input[type="text"]{flex:1 1 auto;min-width:0;width:auto;}
+.edit-brand .prow.brand-color input[type="color"]{width:38px;height:30px;padding:2px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;flex:0 0 auto;}
+.edit-brand .esw{display:inline-flex;align-items:center;gap:5px;padding:2px 9px 2px 7px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:11.5px;font-weight:600;color:#4b5563;cursor:pointer;user-select:none;transition:.15s;}
+.edit-brand .esw input{width:14px;height:14px;flex:0 0 auto;margin:0;accent-color:var(--brand);}
+.edit-brand .esw:has(input:checked){border-color:var(--brand);background:#eef1ff;color:var(--brand);}
 /* 批量改权限弹窗：复用 .edit-box / .edit-grid / .efield 全套样式，只补说明文字 */
 .edit-box .bk-tip{margin:0 0 10px;font-size:12px;line-height:1.6;color:var(--muted);}
 .edit-box .bk-tip b{color:var(--brand);}
@@ -710,16 +805,64 @@ img { max-width: 100%; }
   .card-grid,
   .card-grid.with-owner{ grid-template-columns:1fr; }
 
-  /* 表格：外层容器横向滚动，列不再被压扁也不会撑破页面 */
-  #orgMembers, #superAudit, #fileGrid, #superStores, .store-members,
-  #superStats, #superUsers, #dashboardPanel{
+  /* 表格：外层容器横向滚动，列不再被压扁也不会撑破页面
+     （用户管理 / 操作日志已改卡片式，不再横向滚动，见下方 table.mtab） */
+  #orgMembers, #fileGrid, #superStores, .store-members,
+  #superStats, #dashboardPanel{
     overflow-x:auto; -webkit-overflow-scrolling:touch;
   }
   #orgMembers > table{ min-width:460px; }
-  #superAudit > table{ min-width:560px; }
   #fileGrid   > table{ min-width:680px; }
   .store-members table{ min-width:480px; }
-  #superStats table, #superUsers table, #dashboardPanel table{ min-width:440px; }
+  #superStats table, #dashboardPanel table{ min-width:440px; }
+
+  /* 后台数据表 → 手机卡片式：表头隐藏、每行一张卡、字段名做前缀（用户管理 / 操作日志）
+     注：基础规则 table.vt td 同为 (0,1,2)，本块必须排在 style.css 里 vt 定义（约 L328）之后才生效，勿上移 */
+  table.mtab{ min-width:0; }
+  table.mtab thead{ display:none; }
+  table.mtab, table.mtab tbody, table.mtab tr, table.mtab td{ display:block; width:auto; }
+  table.mtab tr{
+    border:1px solid var(--line); border-radius:12px; background:var(--panel);
+    padding:11px 13px; margin:0 0 10px; box-shadow:var(--shadow-sm);
+  }
+  table.mtab tr:hover td{ background:transparent; }
+  table.mtab td{ border:none; padding:4px 0; display:flex; align-items:flex-start; gap:10px; }
+  table.mtab td::before{
+    content:attr(data-label); flex:0 0 62px; color:var(--muted);
+    font-size:12px; font-weight:600; line-height:1.65;
+  }
+  /* 卡片标题（邮箱 / 动作）：去掉前缀标签、加粗、整行、底部虚线分隔 */
+  table.mtab td.ttl-cell{
+    display:block; font-weight:700; font-size:14px; color:var(--ink);
+    padding:0 0 9px; margin-bottom:7px; border-bottom:1px dashed var(--line);
+    word-break:break-all; line-height:1.5;
+  }
+  table.mtab td.ttl-cell::before{ display:none; }
+  /* 卡片里的时间：小灰字、不占标签位 */
+  table.mtab td.time-cell{ display:block; padding:0; color:var(--muted); font-size:11.5px; line-height:1.5; }
+  table.mtab td.time-cell::before{ display:none; }
+  /* 操作区：独立一行，按钮 2 列均分、手指友好 */
+  table.mtab td.acts-cell{
+    display:flex; flex-wrap:wrap; gap:8px; align-items:stretch;
+    margin-top:9px; padding-top:10px; border-top:1px dashed var(--line);
+  }
+  table.mtab td.acts-cell::before{ display:none; }
+  table.mtab td.acts-cell .btn{ flex:1 1 calc(50% - 4px); justify-content:center; }
+  /* 空态行（暂无数据）不套卡片标签 */
+  table.mtab td[colspan]{ display:block; text-align:center; color:var(--muted); }
+  table.mtab td[colspan]::before{ display:none; }
+  table.mtab td .org-sel{ width:100%; min-width:0; }
+  /* 操作日志卡片：时间挪到右上角、动作当标题，其余按「标签 + 内容」排 */
+  #superAudit table.mtab{ margin-top:0; }
+  #superAudit table.mtab tr{
+    display:grid; grid-template-columns:1fr auto; column-gap:10px; row-gap:2px; align-items:start;
+    grid-template-areas:"act time" "obj obj" "det det" "usr usr";
+  }
+  #superAudit table.mtab td.ttl-cell{ grid-area:act; padding:0; margin:0; border-bottom:none; }
+  #superAudit table.mtab td.time-cell{ grid-area:time; text-align:right; white-space:nowrap; }
+  #superAudit table.mtab td[data-label="对象"]{ grid-area:obj; }
+  #superAudit table.mtab td[data-label="详情"]{ grid-area:det; }
+  #superAudit table.mtab td[data-label="操作人"]{ grid-area:usr; }
 
   /* 操作按钮触感更大（手指友好） */
   .btn, .tab, .chip,
@@ -735,10 +878,41 @@ img { max-width: 100%; }
   .modal{ padding:12px; }
   .modal .box{ padding:18px 16px; }
 
-  /* 筛选条：每个字段独占一行 */
-  .audit-bar .ab{ flex:1 1 100%; }
+  /* 筛选条（操作日志 / 文件管理）：手机端改 2 列网格——短字段并排、长输入整行，高度砍掉近一半 */
+  .audit-bar{
+    display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; align-items:end;
+    padding:11px 12px; margin-bottom:10px;
+  }
+  .audit-bar .ab{ flex:none; min-width:0; }
+  .audit-bar .ab label{ font-size:11px; }
   .audit-bar .ab input, .audit-bar .ab select{ width:100%; min-width:0; }
-  .audit-bar .ab-acts{ margin-left:0; flex:1 1 100%; }
+  .audit-bar .ab.grow{ grid-column:1 / -1; }
+  .audit-bar .ab-acts{ grid-column:1 / -1; margin-left:0; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .audit-bar .ab-acts .btn{ width:100%; }
+
+  /* ============ 设置页 · 手机端收紧 ============ */
+  /* 账号信息：邮箱/所属组织整行，角色与姓名并排；访问限制、品牌字段两列 */
+  .acct-grid{ grid-template-columns:1fr 1fr; }
+  .acct-grid .frow:first-child, .acct-grid #setOrgSec{ grid-column:1 / -1; }
+  .limit-grid{ grid-template-columns:1fr 1fr; }
+  .brand-grid{ grid-template-columns:1fr; }
+  /* 输入框加高：手机 16px 字号下 28px 太局促，40px 也更好点 */
+  .inp{ height:40px; }
+  /* 保护开关：两列网格排齐（奇数个时末项占整行，不留半格空档） */
+  .tgls{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .tgls .switch{ min-width:0; justify-content:center; padding:8px 6px; }
+  .tgls .switch:last-child{ grid-column:1 / -1; }
+  /* 保存条吸底：长表单不必滚到底找「保存设置」 */
+  .set-foot{
+    position:-webkit-sticky; position:sticky; bottom:0; z-index:6;
+    display:grid; grid-template-columns:1fr 1fr; gap:8px;
+    margin:10px 0 0; padding:10px 0 8px;
+    background:rgba(245,247,251,.94); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+    border-top:1px solid var(--line);
+  }
+  .set-foot #setMsg{ grid-column:1 / -1; }
+  .set-foot #setMsg:empty{ display:none; }
+  .set-foot #setSave{ grid-column:1 / -1; }
 
   /* 链接框 / 分享链接行：窄屏换行 */
   .linkbox, .share-link-row{ flex-wrap:wrap; }
@@ -751,6 +925,35 @@ img { max-width: 100%; }
   input, select, textarea{ font-size:16px; }
   /* 登录弹窗的输入框样式权重更高，这里补一条把它拉回 16px，否则 iOS 上聚焦会自动放大整页 */
   .lg-inp input{ font-size:16px; }
+
+  /* ============ 创建分享页 · 手机端专项优化 ============ */
+  /* P2-6 隐藏面包屑，给内容让出一行高度 */
+  .crumb{ display:none; }
+  /* P2-7 上传区收紧 */
+  .create-shell .hero{ padding:10px 12px; margin-bottom:8px; }
+  .create-shell .drop{ padding:10px 12px; gap:10px; }
+  .create-shell .file-pill{ padding:8px 10px; }
+  /* P0-2 高级设置折叠：默认收起、点标题展开（JS 切 .adv-open 类）；内部 5 卡单列铺开 */
+  .create-shell .adv-collapse{ display:block; border:1px solid var(--line); border-radius:12px; background:var(--panel); box-shadow:var(--shadow-sm); overflow:hidden; margin:2px 0 0; }
+  .create-shell .adv-sum{ display:flex; align-items:center; justify-content:space-between; padding:13px 14px; font-size:13px; font-weight:700; color:var(--ink); cursor:pointer; user-select:none; -webkit-tap-highlight-color:transparent; }
+  .create-shell .adv-sum .chev{ font-size:12px; color:var(--muted); transition:transform .2s; }
+  .create-shell .adv-collapse.adv-open .adv-sum .chev{ transform:rotate(180deg); }
+  .create-shell .adv-collapse .adv-tiles{ display:grid; grid-template-columns:1fr; gap:12px; padding:12px 14px 14px; background:transparent; border:none; box-shadow:none; }
+  .create-shell .adv-collapse .adv-tiles .tile{ margin:0; }
+  .create-shell .adv-collapse:not(.adv-open) .adv-tiles{ display:none; }
+  /* P1-3 访问 / 预览限制输入框拉满整行（标签在上、输入在下） */
+  .create-shell .triple-row.sec-grid > div{ flex-direction:column; align-items:stretch; gap:3px; }
+  .create-shell .triple-row.sec-grid input{ width:100%; text-align:left; }
+  .create-shell .triple-row.sec-grid .tiny-label{ text-align:left; white-space:normal; }
+  /* P1-4 验证方式两按钮并排 */
+  .create-shell .auth-chips{ flex-direction:row; gap:8px; }
+  .create-shell .auth-chips button{ width:auto; min-width:0; flex:1 1 0; }
+  /* A2 手机端随机按钮放大，便于点按 */
+  .create-shell .tile-perms .mini-btn{ width:42px; height:42px; font-size:18px; }
+  /* P0-1 底部按钮吸底 + 草稿改小号（高优先级选择器，压过 ≤480 的整行堆叠规则） */
+  .create-shell .foot{ position:-webkit-sticky; position:sticky; bottom:0; flex-direction:row; align-items:stretch; gap:8px; margin:10px 0 0; padding:10px 2px 6px; background:rgba(245,247,251,.94); backdrop-filter:blur(8px); border-top:1px solid var(--line); z-index:6; }
+  .create-shell .foot #shareBtn{ flex:1 1 auto; min-height:46px; }
+  .create-shell .foot #draftBtn{ flex:0 0 auto; min-height:46px; padding:0 16px; font-size:13px; }
 }
 
 @media (max-width: 480px) {

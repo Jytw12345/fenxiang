@@ -26,7 +26,7 @@
   <div class="topbar">
     <div class="crumb"><b id="pageCrumb">工作台</b></div>
     <div class="top-right">
-      <button class="btn sm" id="btnNewShare">＋ 新建分享</button>
+      <button class="btn sm" id="btnNewShare">＋ 创建分享</button>
       <span id="userArea" class="sub"></span>
     </div>
   </div>
@@ -34,10 +34,10 @@
   <div class="tabs" id="tabs" style="display:none">
     <button class="tab active" data-tab="mine">我的分享</button>
     <button class="tab" data-tab="files" id="tabFiles">文件管理</button>
-    <button class="tab" data-tab="org">全店分享</button>
+    <button class="tab" data-tab="org">本店分享</button>
     <button class="tab" data-tab="members">成员</button>
     <button class="tab" data-tab="invite">邀请码</button>
-    <button class="tab" data-tab="allshares" id="tabAllShares" style="display:none">全部分享</button>
+    <button class="tab" data-tab="allshares" id="tabAllShares" style="display:none">跨店分享</button>
     <button class="tab" data-tab="stats" id="tabStats" style="display:none">存储用量</button>
     <button class="tab" data-tab="dashboard" id="tabDashboard" style="display:none">数据概览</button>
     <button class="tab" data-tab="users" id="tabUsers" style="display:none">用户管理</button>
@@ -80,10 +80,11 @@
         <div class="icon">⬆</div>
         <div class="txt">
           <div><b>拖拽文件到此处</b>，或点击选择</div>
-          <div class="s">支持 PDF / Word / 图片 · 单文件最大 200MB · 自动生成在线预览</div>
+          <div class="s">支持 PDF / Word / Excel / PPT / 图片 / 设计源文件 · 单文件最大 200MB · 自动生成在线预览</div>
         </div>
       </div>
       <div class="file-pill" id="fileinfo">
+        <a class="fi-thumb" id="fiThumbWrap" href="#" title="预览" style="display:none"><img id="fiThumb" alt="文件预览" /></a>
         <div class="ic" id="fiIc">📄</div>
         <div class="file-meta">
           <div class="nm" id="fiNm"></div>
@@ -96,31 +97,37 @@
             <div class="fp-size" id="fpSize">0 MB / 0 MB</div>
           </div>
         </div>
-        <a href="#" id="fiClear">移除</a>
+        <span class="file-acts">
+          <a href="#" id="fiPreview" title="预览文件" style="display:none">预览</a>
+          <a href="#" id="fiClear">移除</a>
+        </span>
       </div>
-      <input type="file" id="file" hidden accept=".pdf,.docx,.png,.jpg,.jpeg,.gif,.webp,.bmp,.psd,.psb,.ai,.cdr,.eps,.indd,.tif,.tiff,.svg,.raw,.cr2,.nef,.arw,image/*" />
+      <input type="file" id="file" hidden accept=".pdf,.docx,.xlsx,.xls,.pptx,.ppt,.png,.jpg,.jpeg,.gif,.webp,.bmp,.psd,.psb,.ai,.cdr,.eps,.indd,.tif,.tiff,.svg,.raw,.cr2,.nef,.arw,image/*" />
     </div>
 
     <div class="sec-title">访问权限设置</div>
     <div class="tiles">
 
       <!-- 文件与访问码 -->
-      <div class="tile">
+      <div class="tile tile-perms tile-span2">
         <div class="tile-hd"><span class="ic">📄</span><span class="ttl">文件与访问码</span></div>
         <div class="tile-bd">
           <div class="pfield">
-            <label>文件名称 <small>展示给访客，默认使用原文件名</small></label>
+            <label>文件名称 <small>访客可见</small></label>
             <input id="name" placeholder="如：济宁佳印图文 看样文件" />
           </div>
           <div class="pfield">
-            <label>访问码 <small>留空不设；访客打开链接时需输入此码</small></label>
-            <input id="code" placeholder="如：8888" />
+            <label>访问码 <small>可留空</small></label>
+            <div class="inp-row">
+              <input id="code" placeholder="如：8888" inputmode="numeric" />
+              <button type="button" id="genCode" class="mini-btn" title="随机生成访问码" aria-label="随机生成访问码">🎲</button>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- 访问限制 -->
-      <div class="tile">
+      <div class="tile tile-limits">
         <div class="tile-hd"><span class="ic">👥</span><span class="ttl">访问限制</span><small>0 = 不限制</small></div>
         <div class="tile-bd">
           <div class="triple-row sec-grid">
@@ -133,16 +140,20 @@
               <input id="maxViews" type="number" min="0" value="0" placeholder="0" />
             </div>
             <div>
-              <div class="tiny-label">单次时长（分）</div>
+              <div class="tiny-label">单次时长(分)</div>
               <input id="duration" type="number" min="0" value="0" placeholder="0" />
             </div>
           </div>
         </div>
       </div>
 
+      <!-- 高级设置：手机端折叠收起（JS 切 .adv-open 类；不用 details —— Chromium 忽略 details 上的 display:contents），桌面端展开并入同一网格 -->
+      <div class="adv-collapse" id="advCollapse">
+        <div class="adv-sum" role="button" tabindex="0" aria-expanded="false">高级设置 <span class="chev">▾</span></div>
+        <div class="tiles adv-tiles">
       <!-- 有效期（与其他卡片同宽） -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">⏳</span><span class="ttl">有效期</span></div>
+        <div class="tile-hd"><span class="ic">⏳</span><span class="ttl">有效期</span><small class="hint" id="expireHint"></small></div>
         <div class="tile-bd">
           <div class="exp-bar">
             <div class="exp-chips" id="expireChips">
@@ -155,7 +166,6 @@
             <div class="exp-custom-row" id="expireCustomRow">
               <button type="button" id="expireCustomBtn" data-val="custom">自定义</button>
               <input type="datetime-local" id="expireCustom" />
-              <span class="hint" id="expireHint"></span>
             </div>
           </div>
         </div>
@@ -163,7 +173,7 @@
 
       <!-- 验证方式（单选胶囊） -->
       <div class="tile">
-        <div class="tile-hd"><span class="ic">🔐</span><span class="ttl">验证方式</span><small>单选</small></div>
+        <div class="tile-hd"><span class="ic">🔐</span><span class="ttl">验证方式</span><small>访问码仅在公开方式下生效</small></div>
         <div class="tile-bd">
           <div class="auth-chips" id="authChips">
             <button type="button" data-val="open" class="active">
@@ -173,10 +183,6 @@
             <button type="button" data-val="approve">
               <span class="ttl">申请授权</span>
               <small>访客需我批准</small>
-            </button>
-            <button type="button" data-val="wechat" hidden>
-              <span class="ttl">微信验证</span>
-              <small>访客扫码确认</small>
             </button>
           </div>
         </div>
@@ -190,7 +196,7 @@
             <label class="switch rest-doc"><input type="checkbox" id="rCopy" checked /> <span>禁止复制</span></label>
             <label class="switch rest-doc"><input type="checkbox" id="rPrint" checked /> <span>禁止打印</span></label>
             <label class="switch rest-all"><input type="checkbox" id="rDownload" checked /> <span>禁止下载</span></label>
-            <label class="switch rest-shot"><input type="checkbox" id="rScreenshot" /> <span>防截图</span></label>
+            <label class="switch rest-shot" title="实质是让水印层缓慢漂移以提升截图留痕难度，并非禁止截屏；需配合水印才有效"><input type="checkbox" id="rScreenshot" /> <span>截图留痕</span></label>
           </div>
           <label class="opt-row">
             <input type="checkbox" id="antiForward" />
@@ -214,23 +220,26 @@
           </div>
           <label class="opt-row" id="wmDlWrap">
             <input type="checkbox" id="wmDl" />
-            <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF / Word</span></span>
+            <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF</span></span>
           </label>
         </div>
       </div>
 
-      <!-- 预览限制（跨整行） -->
-      <div class="tile tile-wide">
-        <div class="tile-hd"><span class="ic">👁️</span><span class="ttl">预览限制</span><small>仅 PDF / Word 生效</small></div>
+      <!-- 预览限制 -->
+      <div class="tile tile-preview">
+        <div class="tile-hd"><span class="ic">👁️</span><span class="ttl">预览限制</span><small>仅 PDF</small></div>
         <div class="tile-bd">
           <label class="opt-row">
             <input type="checkbox" id="previewEnabled" />
-            <span class="otxt"><span class="ot">仅允许试看前几页</span><span class="os">超出页数需输入密码后才能继续查看</span></span>
+            <span class="otxt"><span class="ot">仅允许试看前几页</span><span class="os">超出页数后，输入密码才能继续查看</span></span>
           </label>
           <div class="triple-row sec-grid">
             <div><div class="tiny-label">试看页数</div><input id="previewPages" type="number" min="1" value="2" /></div>
-            <div><div class="tiny-label">超出后密码</div><input id="protectPassword" type="text" placeholder="留空则不可看" autocomplete="off" /></div>
+            <div><div class="tiny-label">超出后密码</div><input id="protectPassword" type="text" placeholder="留空则不可查看更多" autocomplete="off" /></div>
           </div>
+        </div>
+      </div>
+
         </div>
       </div>
 
@@ -238,7 +247,7 @@
 
       <div class="notice warn" id="noStoreNotice" style="display:none">您尚未归属任何门店，暂不能创建分享。请联系超级管理员为您分配门店后重试。</div>
       <div class="foot" id="foot">
-      <button class="btn ghost">存为草稿</button>
+      <button class="btn ghost" id="draftBtn" type="button">存为草稿</button>
       <button class="btn" id="shareBtn">立即分享</button>
     </div>
    </div>
@@ -250,7 +259,7 @@
       <div class="set-head">
         <div>
           <h1 class="page-title">账号设置</h1>
-          <p class="page-sub">账号、密码与默认分享参数，集中管理</p>
+          <p class="page-sub">账号信息与默认分享参数，集中管理</p>
         </div>
       </div>
 
@@ -259,32 +268,32 @@
       </div>
 
       <div id="setContent" class="set-cards">
-        <section class="scard">
-          <h3>账号信息</h3>
-          <div class="frow"><label>邮箱（不可修改）</label><input id="setEmail" class="inp" readonly /></div>
-          <div class="frow"><label>角色</label><input id="setRole" class="inp" readonly /></div>
-          <div class="frow"><label>真实姓名</label><input id="setRealName" class="inp" placeholder="请输入真实姓名" /></div>
-          <div class="frow" id="setOrgSec" style="display:none"><label>所属组织</label><input id="setOrg" class="inp" readonly /></div>
-        </section>
-
-        <section class="scard">
-          <h3>修改密码 <small>留空则不修改</small></h3>
-          <div class="frow"><label>原密码</label><div class="pw"><input id="setOldPw" type="password" class="inp" placeholder="原密码" /><button type="button" class="pw-toggle" id="setOldToggle" title="显示/隐藏">👁️</button></div></div>
-          <div class="frow"><label>新密码</label><div class="pw"><input id="setNewPw" type="password" class="inp" placeholder="至少 8 位，含字母和数字" /><button type="button" class="pw-toggle" id="setNewToggle" title="显示/隐藏">👁️</button></div></div>
-          <div class="frow"><label>确认新密码</label><input id="setNewPw2" type="password" class="inp" placeholder="再次输入新密码" /></div>
+        <section class="scard span2">
+          <h3>账号信息<button class="btn ghost sm h3-act" id="setPwdBtn" type="button">修改密码</button></h3>
+          <div class="acct-grid">
+            <div class="frow"><label>邮箱（不可修改）</label><input id="setEmail" class="inp" readonly /></div>
+            <div class="frow"><label>角色</label><input id="setRole" class="inp" readonly /></div>
+            <div class="frow"><label>真实姓名</label><input id="setRealName" class="inp" placeholder="请输入真实姓名" /></div>
+            <div class="frow" id="setOrgSec" style="display:none"><label>所属组织</label><input id="setOrg" class="inp" readonly /></div>
+          </div>
         </section>
 
         <section class="scard span2">
-          <h3>默认分享参数 <small>新建分享自动带入</small></h3>
-          <div class="grid2">
-            <div class="frow"><label>默认有效期</label>
-              <select id="setExpire" class="inp"><option value="1">1 天</option><option value="3">3 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">永久有效</option></select>
+          <h3>默认分享参数 <small>创建分享自动带入</small></h3>
+          <div class="pref-grid">
+            <div class="pf-box">
+              <div class="pf-hd">访问控制</div>
+              <div class="frow"><label>默认有效期</label>
+                <select id="setExpire" class="inp"><option value="1">1 天</option><option value="3">3 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">永久有效</option></select>
+              </div>
+              <div class="frow"><label>默认验证方式</label>
+                <select id="setAuthMode" class="inp"><option value="open">公开（任何人可打开）</option><option value="approve">申请授权（需我批准）</option><option value="wechat" hidden>微信验证（访客扫码）</option></select>
+              </div>
+              <div class="frow"><label>默认访问码</label><input id="setCode" class="inp" placeholder="留空不设" /></div>
             </div>
-            <div class="frow"><label>默认验证方式</label>
-              <select id="setAuthMode" class="inp"><option value="open">公开（任何人可打开）</option><option value="approve">申请授权（需我批准）</option><option value="wechat" hidden>微信验证（访客扫码）</option></select>
-            </div>
-            <div class="frow"><label>默认访问码</label><input id="setCode" class="inp" placeholder="留空不设" /></div>
-            <div class="frow frow-wm"><label>默认水印</label>
+
+            <div class="pf-box">
+              <div class="pf-hd">默认水印</div>
               <div class="wm-widget">
                 <div class="chips wm-types">
                   <label><input type="radio" name="setWmMode" value="none" checked /> <span>无水印</span></label>
@@ -297,23 +306,43 @@
                 </div>
                 <label class="opt-row" id="setWmDlWrap">
                   <input type="checkbox" id="setWmDl" />
-                  <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF / Word</span></span>
+                  <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF</span></span>
                 </label>
               </div>
             </div>
-            <div class="frow"><label>最大人数</label><input id="setMaxViewers" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
-            <div class="frow"><label>最大次数</label><input id="setMaxViews" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
-            <div class="frow"><label>单次时长(分)</label><input id="setDuration" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
-            <div class="frow"><label>仅预览前(页)</label><input id="setPreviewPages" type="number" min="0" class="inp" placeholder="0 = 不限制" /></div>
-            <div class="frow"><label>后续内容密码</label><input id="setProtectPassword" class="inp" placeholder="留空不设" /></div>
+
+            <div class="pf-box">
+              <div class="pf-hd">访问限制 <small>0 = 不限制</small></div>
+              <div class="limit-grid">
+                <div class="frow"><label>最大人数</label><input id="setMaxViewers" type="number" min="0" class="inp" placeholder="0" /></div>
+                <div class="frow"><label>最大次数</label><input id="setMaxViews" type="number" min="0" class="inp" placeholder="0" /></div>
+                <div class="frow"><label>单次时长(分)</label><input id="setDuration" type="number" min="0" class="inp" placeholder="0" /></div>
+                <div class="frow"><label>仅预览前(页)</label><input id="setPreviewPages" type="number" min="0" class="inp" placeholder="0" /></div>
+                <div class="frow spanl"><label>后续内容密码</label><input id="setProtectPassword" class="inp" placeholder="留空不设" /></div>
+              </div>
+            </div>
           </div>
           <div class="tgls">
             <label class="switch"><input type="checkbox" id="setCopy" checked /> <span>禁止复制</span></label>
             <label class="switch"><input type="checkbox" id="setPrint" checked /> <span>禁止打印</span></label>
             <label class="switch"><input type="checkbox" id="setDownload" checked /> <span>禁止下载</span></label>
-            <label class="switch"><input type="checkbox" id="setScreenshot" /> <span>防截图</span></label>
+            <label class="switch"><input type="checkbox" id="setScreenshot" /> <span>截图留痕</span></label>
             <label class="switch"><input type="checkbox" id="setAntiForward" /> <span>链接防转发</span></label>
           </div>
+        </section>
+
+        <section class="scard span2">
+          <h3>品牌设置（白标）<small>账号所有分享统一套用</small></h3>
+          <div class="brand-grid">
+            <div class="frow"><label>品牌名称</label><input id="setBrandName" class="inp" maxlength="20" placeholder="默认显示「安阅」" /></div>
+            <div class="frow"><label>Logo URL</label><input id="setBrandLogo" class="inp" placeholder="可选，建议正方形 PNG/SVG" /></div>
+            <div class="frow brand-color"><label>主题色</label>
+              <input type="color" id="setBrandColor" value="#4f6ef2" />
+              <input id="setBrandColorHex" class="inp wb-hex" maxlength="7" placeholder="#4f6ef2" />
+            </div>
+            <label class="switch set-brand-hide"><input type="checkbox" id="setBrandHide" /> <span>隐藏「由安阅提供」</span></label>
+          </div>
+          <p class="set-hint">设置后，该账号下所有分享的访客端将显示你的品牌名、Logo 与主题色，替换默认「安阅」标识。</p>
         </section>
       </div>
 
@@ -387,7 +416,7 @@
       <ul class="lg-feats">
         <li>上传即生成受限链接与二维码</li>
         <li>人数 / 次数 / 时长 / 有效期可限</li>
-        <li>禁复制 · 禁打印 · 禁下载 · 防截图</li>
+        <li>禁复制 · 禁打印 · 禁下载 · 截图留痕</li>
         <li>访问可追踪，随时远程销毁</li>
       </ul>
       <div class="lg-side-foot">内部使用 · 请勿外传</div>
@@ -498,6 +527,22 @@
   </div>
 </div>
 
+<div class="modal" id="pwdModal">
+  <div class="box" style="max-width:420px;text-align:left">
+    <button class="modal-close" id="pwdClose" aria-label="关闭">×</button>
+    <h2 style="margin-bottom:4px">修改密码</h2>
+    <p class="sub" style="margin:0 0 12px">修改成功后，其它设备会自动退出登录</p>
+    <div class="frow"><label>原密码</label><div class="pw"><input id="setOldPw" type="password" class="inp" placeholder="请输入原密码" autocomplete="current-password" /><button type="button" class="pw-toggle" id="setOldToggle" title="显示/隐藏">👁️</button></div></div>
+    <div class="frow"><label>新密码</label><div class="pw"><input id="setNewPw" type="password" class="inp" placeholder="至少 8 位，含字母和数字" autocomplete="new-password" /><button type="button" class="pw-toggle" id="setNewToggle" title="显示/隐藏">👁️</button></div></div>
+    <div class="frow"><label>确认新密码</label><input id="setNewPw2" type="password" class="inp" placeholder="再次输入新密码" autocomplete="new-password" /></div>
+    <div id="pwdMsg" class="form-msg" style="margin-top:8px"></div>
+    <div style="display:flex;gap:10px;margin-top:12px;justify-content:flex-end">
+      <button class="btn ghost sm" id="pwdCancel" type="button">取消</button>
+      <button class="btn sm" id="pwdSave" type="button">确认修改</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="result">
   <div class="box" style="position:relative">
     <button class="modal-close" id="closeResult" aria-label="关闭">×</button>
@@ -526,7 +571,7 @@
 
 <div class="toast" id="toast"></div>
 <!-- 替换文件用的隐藏文件选择器（分享卡片与文件管理共用） -->
-<input type="file" id="replaceFileInput" style="display:none" accept=".pdf,.docx,.png,.jpg,.jpeg,.gif,.webp,.bmp,.psd,.psb,.ai,.cdr,.eps,.indd,.tif,.tiff,.svg,.raw,.cr2,.nef,.arw,image/*" />
+<input type="file" id="replaceFileInput" style="display:none" accept=".pdf,.docx,.xlsx,.xls,.pptx,.ppt,.png,.jpg,.jpeg,.gif,.webp,.bmp,.psd,.psb,.ai,.cdr,.eps,.indd,.tif,.tiff,.svg,.raw,.cr2,.nef,.arw,image/*" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="/env.js"></script>
 <script src="/js/ctxmenu.js"></script>
