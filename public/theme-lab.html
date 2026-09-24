@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>安阅 · 界面主题对比</title>
+<link rel="stylesheet" href="/style.css" />
+<style>
+  html,body{margin:0;background:#EDEFF4;font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;color:#1F2430;}
+  .lab-top{max-width:1280px;margin:0 auto;padding:28px 22px 6px;}
+  .lab-top h1{font-size:22px;margin:0 0 6px;color:#1F2430;font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;}
+  .lab-top p{margin:0;font-size:13px;color:#6B7280;line-height:1.6;}
+  .lab-grid{max-width:1280px;margin:0 auto;padding:18px 22px 70px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;}
+  .lab-card{background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 26px rgba(15,23,42,.09);display:flex;flex-direction:column;}
+  .lab-card-hd{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #ECEFF4;background:#FAFBFD;}
+  .lab-no{width:24px;height:24px;border-radius:7px;background:#1F2430;color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+  .lab-name{font-weight:800;font-size:14.5px;}
+  .lab-desc{font-size:11.5px;color:#6B7280;}
+  .lab-hd-txt{display:flex;flex-direction:column;gap:2px;min-width:0;}
+  .lab-apply{margin-left:auto;font-size:12px;padding:6px 12px;border-radius:999px;border:1px solid #DDE3EC;background:#fff;cursor:pointer;color:#374151;font-weight:600;text-decoration:none;white-space:nowrap;}
+  .lab-apply:hover{border-color:#1F2430;color:#1F2430;}
+  .lab-page{padding:16px;background:linear-gradient(180deg,var(--body-g1) 0%,var(--body-g2) 100%);flex:1;}
+  .lab-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;border-radius:10px;background:var(--panel);border:1px solid var(--line);color:var(--muted);font-size:12px;margin-bottom:10px;}
+  .lab-bar b{color:var(--ink);font-family:var(--serif);font-size:13.5px;letter-spacing:.4px;}
+  .lab-bar .av{width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,var(--brand-l),var(--brand));color:var(--on-brand);font-size:10px;display:flex;align-items:center;justify-content:center;font-weight:700;}
+  /* 组件紧凑化：与后台桌面端观感一致 */
+  .lab-page .hero{margin:0 0 10px;}
+  .lab-page .drop{padding:10px 12px;gap:10px;}
+  .lab-page .drop .icon{width:32px;height:32px;border-radius:9px;font-size:16px;}
+  .lab-page .drop b{font-size:12.5px;}
+  .lab-page .drop .s{font-size:10.5px;}
+  .lab-page .tiles{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;}
+  .lab-page .tile-span2{grid-column:span 2;}
+  .lab-page .tile-perms .tile-bd{display:grid;grid-template-columns:1.7fr 1fr;gap:6px 12px;}
+  .lab-page .inp-row{display:flex;align-items:center;gap:5px;}
+  .lab-page .inp-row input{flex:1 1 auto;min-width:0;width:100%;}
+  /* 放大预览（单主题截图模式）：还原桌面端真实 4 列栅格 */
+  .lab-card.solo .lab-page .tiles{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;}
+  .lab-page .tile{padding:10px 12px;gap:6px;}
+  .lab-page .tile-hd{font-size:11.5px;gap:6px;}
+  .lab-page .tile-hd .ic{width:20px;height:20px;font-size:11px;border-radius:6px;}
+  .lab-page .tile-hd small{font-size:10px;}
+  .lab-page .tile-bd{gap:7px;}
+  .lab-page .tiny-label{font-size:10px;}
+  .lab-page .pfield>label{font-size:11px;margin-bottom:3px;}
+  .lab-page input{font-size:11.5px;padding:5px 8px;border-radius:7px;}
+  .lab-page .mini-btn{width:26px;height:26px;font-size:12px;}
+  .lab-page .inp-row{gap:5px;}
+  .lab-page .triple-row.sec-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;}
+  .lab-page .triple-row.sec-grid input{width:100%;text-align:center;}
+  .lab-page .chips{gap:5px;}
+  .lab-page .chips label{font-size:10.5px;padding:4px 6px;}
+  .lab-page .chips.wm-types label{font-size:10.5px;}
+  .lab-page .opt-row{padding:6px 9px;gap:7px;border-radius:8px;}
+  .lab-page .opt-row .ot{font-size:11px;}
+  .lab-page .opt-row .os{font-size:10px;}
+  .lab-page .exp-chips{gap:3px;}
+  .lab-page .exp-chips button,.lab-page .exp-custom-row button{padding:4px 7px;font-size:10.5px;}
+  .lab-page .auth-chips{gap:6px;}
+  .lab-page .auth-chips button{min-width:0;flex:1 1 0;padding:6px 9px;border-radius:9px;font-size:11.5px;}
+  .lab-page .auth-chips button small{font-size:10px;}
+  .lab-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;}
+  .lab-foot .btn{padding:8px 18px;font-size:13px;border-radius:10px;}
+  .lab-mini{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px;}
+  .lab-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;}
+  .lab-tags .tag{font-size:11px;margin:0;}
+  @media (max-width:900px){ .lab-grid{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="lab-top">
+  <h1>安阅 · 界面主题对比</h1>
+  <p>同一套组件、同一个页面结构，只换配色与质感。点右上角「用这套看真实页面」可在工作台里实地试用（需先登录）。<br>
+     第 4 套（靛青商务）为当前默认，全套主题可随时切换。</p>
+</div>
+<div class="lab-grid" id="labGrid"></div>
+
+<script>
+const THEMES = [
+  {k:'warm',    no:1, name:'雅致暖调',  desc:'米金轻奢 · 象牙白 + 金棕 + 衬线标题'},
+  {k:'ink',     no:2, name:'墨玉禅意',  desc:'宣纸墨黑 · 白灰底 + 玄墨主色 + 朱砂点缀，最克制'},
+  {k:'celadon', no:3, name:'青瓷雅灰',  desc:'雨过天青 · 青瓷绿 + 石白，清雅温润'},
+  {k:'indigo',  no:4, name:'靛青商务',  desc:'沉稳专业 · 靛蓝 + 冷灰，最像成熟的 SaaS 后台（已设为当前默认）'},
+  {k:'obsidian',no:5, name:'曜石黑金',  desc:'暗夜轻奢 · 炭黑底 + 香槟金，护眼、气质最强'}
+];
+
+function tilePerms(){ return `
+  <div class="tile tile-perms tile-span2">
+    <div class="tile-hd"><span class="ic">📄</span><span class="ttl">文件与访问码</span></div>
+    <div class="tile-bd">
+      <div class="pfield"><label>文件名称 <small>访客可见</small></label>
+        <input placeholder="如：济宁佳印图文 看样文件" /></div>
+      <div class="pfield"><label>访问码 <small>可留空</small></label>
+        <div class="inp-row"><input placeholder="如：8888" /><button type="button" class="mini-btn">🎲</button></div></div>
+    </div>
+  </div>`;}
+
+function tileLimits(){ return `
+  <div class="tile">
+    <div class="tile-hd"><span class="ic">👥</span><span class="ttl">访问限制</span><small>0 = 不限制</small></div>
+    <div class="tile-bd">
+      <div class="triple-row sec-grid">
+        <div><div class="tiny-label">最大访客人数</div><input value="0" /></div>
+        <div><div class="tiny-label">最大打开次数</div><input value="0" /></div>
+        <div><div class="tiny-label">单次时长(分)</div><input value="0" /></div>
+      </div>
+      <label class="opt-row"><input type="checkbox" checked />
+        <span class="otxt"><span class="ot">达到上限后自动销毁</span><span class="os">阅后即焚</span></span></label>
+    </div>
+  </div>`;}
+
+function tileExpire(){ return `
+  <div class="tile">
+    <div class="tile-hd"><span class="ic">⏳</span><span class="ttl">有效期</span><small class="hint">10/1 14:07 到期</small></div>
+    <div class="tile-bd">
+      <div class="exp-bar">
+        <div class="exp-chips">
+          <button type="button">1 天</button><button type="button">3 天</button>
+          <button type="button" class="active">7 天</button><button type="button">30 天</button>
+          <button type="button">永久</button>
+        </div>
+        <div class="exp-custom-row"><button type="button">自定义</button><input /></div>
+      </div>
+    </div>
+  </div>`;}
+
+function tileAuth(){ return `
+  <div class="tile">
+    <div class="tile-hd"><span class="ic">🔐</span><span class="ttl">验证方式</span></div>
+    <div class="tile-bd">
+      <div class="auth-chips">
+        <button type="button" class="active"><span class="ttl">公开</span><small>任何人都可打开</small></button>
+        <button type="button"><span class="ttl">申请授权</span><small>访客需我批准</small></button>
+      </div>
+    </div>
+  </div>`;}
+
+function tileGuard(){ return `
+  <div class="tile">
+    <div class="tile-hd"><span class="ic">🛡️</span><span class="ttl">防盗用</span><small>限制访客操作</small></div>
+    <div class="tile-bd">
+      <div class="chips">
+        <label><input type="checkbox" checked /> <span>禁止复制</span></label>
+        <label><input type="checkbox" checked /> <span>禁止打印</span></label>
+        <label><input type="checkbox" checked /> <span>禁止下载</span></label>
+        <label><input type="checkbox" /> <span>截图留痕</span></label>
+      </div>
+      <label class="opt-row"><input type="checkbox" />
+        <span class="otxt"><span class="ot">链接防转发</span><span class="os">仅首次打开的设备可访问</span></span></label>
+    </div>
+  </div>`;}
+
+function tileWater(){ return `
+  <div class="tile">
+    <div class="tile-hd"><span class="ic">💧</span><span class="ttl">水印</span><small>预览与下载留痕</small></div>
+    <div class="tile-bd">
+      <div class="chips wm-types">
+        <label><input type="radio" name="wm-{K}" checked /> <span>无水印</span></label>
+        <label><input type="radio" name="wm-{K}" /> <span>静态水印</span></label>
+        <label><input type="radio" name="wm-{K}" /> <span>动态水印</span></label>
+      </div>
+      <div class="wm-textwrap"><input placeholder="水印文字，如：内部资料 严禁外传" /></div>
+      <label class="opt-row"><input type="checkbox" />
+        <span class="otxt"><span class="ot">下载副本也带水印</span><span class="os">图片 / PDF</span></span></label>
+    </div>
+  </div>`;}
+
+function tilePreview(){ return `
+  <div class="tile">
+    <div class="tile-hd"><span class="ic">👁️</span><span class="ttl">预览限制</span><small>仅 PDF</small></div>
+    <div class="tile-bd">
+      <label class="opt-row"><input type="checkbox" />
+        <span class="otxt"><span class="ot">仅允许试看前几页</span><span class="os">超出页数后需密码</span></span></label>
+      <div class="triple-row sec-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div><div class="tiny-label">试看页数</div><input value="2" /></div>
+        <div><div class="tiny-label">超出后密码</div><input placeholder="留空" /></div>
+      </div>
+    </div>
+  </div>`;}
+
+function miniStats(){ return `  <div class="lab-mini">
+    <div class="vsum-i"><b>12</b><span>今日访问</span></div>
+    <div class="vsum-i"><b>3</b><span>待批准</span></div>
+    <div class="vsum-i"><b>86%</b><span>存储占用</span></div>
+  </div>
+  <div class="lab-tags">
+    <span class="tag on">进行中</span><span class="tag off">已过期</span>
+    <span class="tag blue">水印</span><span class="tag">7 天后失效</span>
+  </div>`;}
+
+function pane(k){
+  return `
+  <div class="lab-page" data-theme="${k}">
+    <div class="lab-bar">
+      <b>安<span style="color:var(--brand)">阅</span></b>
+      <span style="display:flex;align-items:center;gap:6px"><span>创建分享</span><span class="av">安</span> <button class="btn sm" style="padding:4px 10px;font-size:11px">＋ 创建分享</button></span>
+    </div>
+    <div class="hero">
+      <div class="drop">
+        <div class="icon">⬆</div>
+        <div class="txt"><div><b>拖拽文件到此处</b>，或点击选择</div>
+          <div class="s">支持 PDF / Word / Excel / PPT / 图片 / 设计源文件</div></div>
+      </div>
+    </div>
+    <div class="tiles">${tilePerms()}${tileLimits()}${tileExpire()}${tileAuth()}${tileGuard()}${tileWater().replace(/\{K\}/g,k)}${tilePreview()}</div>
+    ${miniStats()}
+    <div class="lab-foot"><button class="btn ghost">存为草稿</button><button class="btn">立即分享</button></div>
+  </div>`;
+}
+
+document.getElementById('labGrid').innerHTML = THEMES.map(t=>`
+  <section class="lab-card">
+    <div class="lab-card-hd">
+      <span class="lab-no">${t.no}</span>
+      <span class="lab-hd-txt"><span class="lab-name">${t.name}</span><span class="lab-desc">${t.desc}</span></span>
+      <a class="lab-apply" href="/admin.html?theme=${t.k}" target="_blank" rel="noopener">用这套看真实页面 ↗</a>
+    </div>
+    ${pane(t.k)}
+  </section>`).join('');
+</script>
+</body>
+</html>

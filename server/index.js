@@ -810,6 +810,13 @@ const server = http.createServer(async (req, res) => {
       }
       const buf = await readBody(req);
       if (!buf.length) return sendJson(res, 400, { error: 'empty' });
+      // 存储配额：单账号上传总大小上限（超管全局参数 storage_quota_mb，0 = 不限制）
+      const quotaMb = Number(globals.get('storage_quota_mb')) || 0;
+      if (quotaMb > 0) {
+        const used = await db.sumStorageForUser(uploadIdn.userId);
+        if (used + buf.length > quotaMb * 1024 * 1024)
+          return sendJson(res, 413, { error: 'quota_exceeded', message: '存储空间不足，已超过账号配额上限' });
+      }
       const fileId = uuid();
       const stored = fileId + ext;
       await storage.save(stored, buf, mime);
@@ -850,6 +857,7 @@ const server = http.createServer(async (req, res) => {
         shareId, fileId: file.id, ownerId, ownerToken, name: s.name || file.original_name, kind: file.kind,
         maxViewers: Number(s.maxViewers) || 0, maxViews: Number(s.maxViews) || 0, durationSec: Number(s.durationSec) || 0,
         expiresAt: s.expiresAt ? Number(s.expiresAt) : null, accessCode: s.accessCode || null, authMode: am,
+        selfDestruct: s.selfDestruct ? 1 : 0,
         watermark: normWatermark(wmIn),
         restrictions: { copy: !!s.disableCopy, print: !!s.disablePrint, download: !!s.disableDownload, screenshot: !!s.disableScreenshot },
         extra,
@@ -859,6 +867,15 @@ const server = http.createServer(async (req, res) => {
       const QRCode = require('qrcode');
       const qr = await QRCode.toDataURL(link);
       return sendJson(res, 200, { shareId, ownerToken, link, qr, name: s.name || file.original_name });
+    }
+
+    // 存储用量（登录可见）：返回当前账号已用字节与配额上限（配额由超管全局参数 storage_quota_mb 控制，0 = 不限制）
+    if (req.method === 'GET' && p === '/api/storage/usage') {
+      const idn = await resolveIdentity(u.searchParams.get('userToken'));
+      if (!idn || idn.type !== 'user') return sendJson(res, 401, { error: 'no_auth' });
+      const used = await db.sumStorageForUser(idn.userId);
+      const quotaMb = Number(globals.get('storage_quota_mb')) || 0;
+      return sendJson(res, 200, { usedBytes: used, quotaBytes: quotaMb * 1024 * 1024 });
     }
 
     // 文件列表（登录可见；超管 scope=all 看全部，并可按 owner 邮箱筛选）
@@ -1177,8 +1194,14 @@ const server = http.createServer(async (req, res) => {
       const otherViewers = distinct.filter(v => v !== viewerToken).length;
       if (share.max_viewers > 0 && otherViewers >= share.max_viewers)
         return sendJson(res, 403, { error: 'limit_viewers', message: '访问人数已达上限' });
-      if (share.max_views > 0 && totalViews >= share.max_views)
+      if (share.max_views > 0 && totalViews >= share.max_views) {
+        // 开启「阅后即焚 / 上限自毁」：达到查看上限后彻底销毁分享（含源文件，若不被其它分享引用）
+        if (share.self_destruct) {
+          await deleteShareDeep(share);
+          return sendJson(res, 403, { error: 'destroyed', message: '已达阅读次数上限，分享已自动销毁' });
+        }
         return sendJson(res, 403, { error: 'limit_views', message: '阅读次数已达上限' });
+      }
 
       if (share.access_code && body.code !== share.access_code) {
         // 访问码试错限流：未带 code 的首访（弹码框）不算试错，带错 code 才计数
@@ -1446,6 +1469,20 @@ const server = http.createServer(async (req, res) => {
         ua: req.headers['user-agent'] || '', event: ev,
         progress: String(body.progress || ''), now: nowMs()
       });
+      // 阅后即焚：访客关闭页面且已达查看上限时立即销毁（最贴近「看完即焚」的时机；
+      // 即使 close 未触发，/api/access 的限额拦截也会在下次访问时兜底销毁）
+      if (ev === 'close') {
+        try {
+          const sh = await db.getShare(sess.share_id);
+          if (sh && sh.self_destruct && sh.max_views > 0) {
+            const c = await db.countOpens(sh.id);
+            if (c >= Number(sh.max_views)) {
+              await deleteShareDeep(sh);
+              console.log('[self-destruct] 分享', sh.id, '已达查看上限，访客关闭后自动销毁');
+            }
+          }
+        } catch (e) {}
+      }
       return sendJson(res, 200, { ok: true });
     }
 
@@ -1461,7 +1498,7 @@ const server = http.createServer(async (req, res) => {
         return {
         shareId: s.id, fileId: s.file_id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers,
-        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
+        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec, selfDestruct: s.self_destruct,
         expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
         // extra（试看页数/保护密码/链接防转发）必须回传，否则改权限弹窗回填不到、保存会静默清掉这些设置
@@ -1596,7 +1633,7 @@ const server = http.createServer(async (req, res) => {
       const list = shares.map(s => ({
         shareId: s.id, name: s.name, kind: s.kind, status: s.status,
         opens: s.opens, viewers: s.viewers, ownerEmail: s.owner_email || '(匿名)',
-        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
+        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec, selfDestruct: s.self_destruct,
         expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
         createdAt: s.created_at, link: `/viewer.html?share=${s.id}`
@@ -1644,7 +1681,7 @@ const server = http.createServer(async (req, res) => {
         shareId: s.id, fileId: s.file_id, name: s.name, kind: s.kind, status: s.status,
         ownerEmail: s.owner_email || '(匿名)',
         opens: s.opens, viewers: s.viewers,
-        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec,
+        maxViewers: s.max_viewers, maxViews: s.max_views, durationSec: s.duration_sec, selfDestruct: s.self_destruct,
         expiresAt: s.expires_at, accessCode: s.access_code, authMode: s.auth_mode, watermark: parseWatermark(s.watermark),
         restrictions: { copy: !!s.disable_copy, print: !!s.disable_print, download: !!s.disable_download, screenshot: !!s.disable_screenshot },
         createdAt: s.created_at, link: `/viewer.html?share=${s.id}`

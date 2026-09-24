@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>安阅 · 工作台</title>
 <link rel="stylesheet" href="/style.css" />
+<script>
+/* 界面主题：?theme=indigo|warm|ink|celadon|obsidian（不带=靛青商务 indigo）
+   带参数时记忆到 localStorage，之后一直沿用；?theme=indigo 恢复默认。
+   仅切视觉变量，不动布局；主题定义见 style.css 末尾「主题系统」。 */
+(function(){try{
+  var q=new URLSearchParams(location.search).get('theme');
+  if(q) localStorage.setItem('ay_theme',q);
+  var t=q||localStorage.getItem('ay_theme')||'indigo';
+  if(t&&t!=='indigo') document.documentElement.setAttribute('data-theme',t);
+  else document.documentElement.removeAttribute('data-theme');
+}catch(e){}})();
+</script>
 </head>
 <body>
 <aside class="side">
@@ -144,6 +156,10 @@
               <input id="duration" type="number" min="0" value="0" placeholder="0" />
             </div>
           </div>
+          <label class="opt-row">
+            <input type="checkbox" id="selfDestroy" />
+            <span class="otxt"><span class="ot">阅后即焚</span><span class="os">达到查看上限后自动销毁</span></span>
+          </label>
         </div>
       </div>
 
@@ -275,6 +291,16 @@
             <div class="frow"><label>角色</label><input id="setRole" class="inp" readonly /></div>
             <div class="frow"><label>真实姓名</label><input id="setRealName" class="inp" placeholder="请输入真实姓名" /></div>
             <div class="frow" id="setOrgSec" style="display:none"><label>所属组织</label><input id="setOrg" class="inp" readonly /></div>
+          </div>
+        </section>
+
+        <section class="scard span2">
+          <h3>存储空间</h3>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px;height:10px;background:#eee;border-radius:6px;overflow:hidden">
+              <div id="storageFill" style="height:100%;width:0;background:#4f6ef2;transition:width .3s"></div>
+            </div>
+            <div id="storageText" class="txt-dim">加载中…</div>
           </div>
         </section>
 

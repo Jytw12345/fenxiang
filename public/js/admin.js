@@ -614,6 +614,7 @@ function renderEditModal(s) {
         <label><input type="checkbox" id="eDl" ${s.restrictions.download?'checked':''}>禁下载</label>
         <label><input type="checkbox" id="eSc" ${s.restrictions.screenshot?'checked':''}>截图留痕</label>
         <label><input type="checkbox" id="eAf" ${(extra.antiForward)?'checked':''}>链接防转发</label>
+        <label><input type="checkbox" id="eSelf" ${(s.selfDestruct)?'checked':''}>达到上限自动销毁</label>
       </div>
 
     <div class="esec esec-sw">
@@ -656,6 +657,8 @@ $('#saveEdit').onclick = async () => {
   const previewEnabled = $('#ePreview').checked;
   const previewPages = previewEnabled ? (parseInt($('#ePPages').value, 10) || 2) : 0;
   const protectPassword = previewEnabled ? ($('#ePPwd').value.trim() || null) : null;
+  // 阅后即焚便捷：勾选「达到上限自动销毁」但次数留空时，默认按 1 次（一次性查看）处理
+  if ($('#eSelf').checked && !(parseInt($('#eMO').value, 10) > 0)) $('#eMO').value = '1';
   // 合并而非从零重建：保留白标 brand 等打开弹窗时已有的字段，杜绝「改一次权限就清空白标」
   const extra = Object.assign({}, currentEditExtra);
   extra.previewPages = previewPages;
@@ -671,6 +674,7 @@ $('#saveEdit').onclick = async () => {
     disableCopy: $('#eCopy').checked, disablePrint: $('#ePrint').checked,
     disableDownload: $('#eDl').checked, disableScreenshot: $('#eSc').checked,
     expiresAt,
+    selfDestruct: $('#eSelf').checked ? 1 : 0,
     extra
   };
   const tk = token || localStorage.getItem('userToken');
@@ -2198,7 +2202,8 @@ async function uploadAndShare() {
       name: $('#name').value || selectedFile.name,
       accessCode: $('#code').value.trim() || null,
       maxViewers: parseInt($('#maxViewers').value, 10) || 0,
-      maxViews: parseInt($('#maxViews').value, 10) || 0,
+      maxViews: (function () { let mv = parseInt($('#maxViews').value, 10) || 0; if (document.getElementById('selfDestroy').checked && mv === 0) mv = 1; return mv; })(),
+      selfDestruct: document.getElementById('selfDestroy').checked ? 1 : 0,
       durationSec: (parseInt($('#duration').value, 10) || 0) * 60,
       authMode: (document.querySelector('#authChips button.active') || { dataset: { val: 'open' } }).dataset.val,
       // 「防截图」实质是让水印层漂移，无水印时无效 → 自动补一个静态水印
@@ -2545,10 +2550,30 @@ async function loadSettings() {
     $('#setBrandColorHex').value = bColor;
     $('#setBrandHide').checked = !!brand.hidePowered;
     $('#setOldPw').value = ''; $('#setNewPw').value = ''; $('#setNewPw2').value = '';
+    loadStorageUsage();
     if (typeof window.afterLogin === 'function') window.afterLogin(d.realName || d.email);
   } catch (e) {
     const msg = $('#setMsg'); if (msg) msg.textContent = '读取资料失败，请刷新重试';
   }
+}
+// 设置页：拉取并展示当前账号存储用量（含配额进度条）
+async function loadStorageUsage() {
+  const tk = localStorage.getItem('userToken'); if (!tk) return;
+  try {
+    const r = await fetch('/api/storage/usage?userToken=' + encodeURIComponent(tk), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    const used = d.usedBytes || 0, quota = d.quotaBytes || 0;
+    const fmt = (b) => { if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'; if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'; return Math.round(b / 1024) + ' KB'; };
+    const txt = quota > 0 ? ('已用 ' + fmt(used) + ' / 配额 ' + fmt(quota)) : ('已用 ' + fmt(used) + '（无配额限制）');
+    const t = document.getElementById('storageText'); if (t) t.textContent = txt;
+    const fill = document.getElementById('storageFill');
+    if (fill) {
+      const pct = quota > 0 ? Math.min(100, Math.round(used / quota * 100)) : 0;
+      fill.style.width = pct + '%';
+      fill.style.background = (quota > 0 && used > quota) ? '#e5484d' : '#4f6ef2';
+    }
+  } catch (e) {}
 }
 // ---------- 修改密码（独立弹窗） ----------
 function openPwdModal() {

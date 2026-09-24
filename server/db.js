@@ -223,22 +223,23 @@ async function listAllFiles() {
 }
 
 // ---------- 分享 ----------
-async function createShare({ shareId, fileId, ownerId, ownerToken, name, kind, maxViewers, maxViews, durationSec, expiresAt, accessCode, authMode, watermark, restrictions, extra, createdAt }) {
+async function createShare({ shareId, fileId, ownerId, ownerToken, name, kind, maxViewers, maxViews, durationSec, expiresAt, accessCode, authMode, selfDestruct, watermark, restrictions, extra, createdAt }) {
   const extraStr = extra ? JSON.stringify(extra) : '';
   await drv.run(`INSERT INTO shares
-    (id,file_id,owner_id,owner_token,name,kind,status,max_viewers,max_views,duration_sec,expires_at,access_code,auth_mode,watermark,disable_copy,disable_print,disable_download,disable_screenshot,extra,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    (id,file_id,owner_id,owner_token,name,kind,status,max_viewers,max_views,duration_sec,expires_at,access_code,auth_mode,watermark,disable_copy,disable_print,disable_download,disable_screenshot,self_destruct,extra,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [shareId, fileId, ownerId, ownerToken, name, kind, 'active',
       maxViewers || 0, maxViews || 0, durationSec || 0,
       expiresAt || null, accessCode || null, authMode, watermark || '',
       restrictions.copy ? 1 : 0, restrictions.print ? 1 : 0, restrictions.download ? 1 : 0, restrictions.screenshot ? 1 : 0,
+      selfDestruct ? 1 : 0,
       extraStr, createdAt, createdAt]);
 }
 async function getShare(id) {
   return drv.get('SELECT * FROM shares WHERE id=?', [id]) || null;
 }
 async function getShareMeta(id) {
-  return drv.get(`SELECT s.id,s.name,s.kind,s.status,s.max_viewers,s.max_views,s.duration_sec,s.expires_at,s.access_code,s.auth_mode,s.watermark,s.disable_copy,s.disable_print,s.disable_download,s.disable_screenshot,s.extra,s.owner_id,
+  return drv.get(`SELECT s.id,s.name,s.kind,s.status,s.max_viewers,s.max_views,s.duration_sec,s.expires_at,s.access_code,s.auth_mode,s.watermark,s.disable_copy,s.disable_print,s.disable_download,s.disable_screenshot,s.self_destruct,s.extra,s.owner_id,
       f.preview_path
     FROM shares s LEFT JOIN files f ON s.file_id=f.id WHERE s.id=?`, [id]) || null;
 }
@@ -258,8 +259,8 @@ function normWatermark(w) {
 async function updateShareSettings(shareId, s, now) {
   const am = (s.authMode === 'approve' || s.authMode === 'wechat') ? s.authMode : 'open';
   const extraStr = s.extra ? (typeof s.extra === 'string' ? s.extra : JSON.stringify(s.extra)) : '';
-  await drv.run(`UPDATE shares SET max_viewers=?,max_views=?,duration_sec=?,expires_at=?,access_code=?,auth_mode=?,watermark=?,disable_copy=?,disable_print=?,disable_download=?,disable_screenshot=?,extra=?,updated_at=? WHERE id=?`,
-    [Number(s.maxViewers) || 0, Number(s.maxViews) || 0, Number(s.durationSec) || 0, s.expiresAt ? Number(s.expiresAt) : null, s.accessCode || null, am, normWatermark(s.watermark), s.disableCopy ? 1 : 0, s.disablePrint ? 1 : 0, s.disableDownload ? 1 : 0, s.disableScreenshot ? 1 : 0, extraStr, now, shareId]);
+  await drv.run(`UPDATE shares SET max_viewers=?,max_views=?,duration_sec=?,expires_at=?,access_code=?,auth_mode=?,watermark=?,disable_copy=?,disable_print=?,disable_download=?,disable_screenshot=?,self_destruct=?,extra=?,updated_at=? WHERE id=?`,
+    [Number(s.maxViewers) || 0, Number(s.maxViews) || 0, Number(s.durationSec) || 0, s.expiresAt ? Number(s.expiresAt) : null, s.accessCode || null, am, normWatermark(s.watermark), s.disableCopy ? 1 : 0, s.disablePrint ? 1 : 0, s.disableDownload ? 1 : 0, s.disableScreenshot ? 1 : 0, s.selfDestruct ? 1 : 0, extraStr, now, shareId]);
 }
 
 // ---------- 访问统计与审批 ----------
@@ -270,6 +271,12 @@ async function countOpens(shareId) {
 async function distinctViewers(shareId) {
   const rows = await drv.all("SELECT DISTINCT viewer_token FROM logs WHERE share_id=? AND event='open'", [shareId]);
   return rows.map(r => r.viewer_token);
+}
+// 单个账号的存储用量：聚合该账号所有分享引用的去重文件大小（字节）。
+// 文件表无 owner 字段，故按「owner 的 shares 引用的 files」聚合；DISTINCT 避免同一文件被多分享引用时重复计入。
+async function sumStorageForUser(userId) {
+  const row = await drv.get(`SELECT COALESCE(SUM(f.size),0) AS used FROM files f WHERE f.id IN (SELECT DISTINCT file_id FROM shares WHERE owner_id=?)`, [userId]);
+  return row ? Number(row.used) : 0;
 }
 async function getApproval(shareId, viewerToken) {
   return drv.get('SELECT * FROM approvals WHERE share_id=? AND viewer_token=?', [shareId, viewerToken]) || null;
@@ -517,7 +524,7 @@ module.exports = {
   // shares
   createShare, getShare, getShareMeta, setShareStatus, updateShareSettings, listExpiredShares,
   // access control / approvals
-  countOpens, distinctViewers, getApproval, touchApproval, upsertApproval,
+  countOpens, distinctViewers, getApproval, touchApproval, upsertApproval, sumStorageForUser,
   // sessions / logs
   createSession, getSession, updateSessionUnlock, logOpen, recordProgress, getShareLogs, getShareViewers, getPendingApprovals,
   // admin

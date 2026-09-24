@@ -31,6 +31,10 @@ const REGISTRY = [
   { key: 'expired_share_retention_days', env: 'EXPIRED_SHARE_RETENTION_DAYS', type: 'int', group: '保留与清理', label: '过期分享保留天数（自动清理）',
     default: 30, help: '分享到期后保留多少天，超过后由每日定时任务自动彻底删除该分享，并级联删除未被其他分享引用的源文件。设为 0 关闭自动清理。' },
 
+  // —— 存储配额 ——
+  { key: 'storage_quota_mb', env: 'STORAGE_QUOTA_MB', type: 'int', group: '存储配额', label: '单账号存储配额（MB）',
+    default: 0, help: '每个账号可上传的总大小上限（MB），0 表示不限制；超过后拒绝上传。按「该账号所有分享引用的去重文件大小」累计。' },
+
   // —— 防盗用默认策略（新建分享时的全局默认，创建时可覆盖） ——
   { key: 'default_watermark_mode', env: '', type: 'enum', options: ['none', 'static', 'dynamic'], group: '防盗用默认策略',
     label: '默认水印模式', default: 'none', help: '新建分享默认采用的水印模式（none / static / dynamic）。' },
