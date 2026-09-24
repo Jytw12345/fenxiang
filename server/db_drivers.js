@@ -142,6 +142,37 @@ function approvalSql(type) {
   };
 }
 
+// ---------- Supabase / PostgREST 加固（仅当检测到 Supabase 角色时执行） ----------
+// 背景：Supabase 把 public schema 暴露为 REST API，并默认给 anon / authenticated 授予
+// public 全部表的读写权限。本项目业务表由服务端直连（DATABASE_URL）创建，若不开 RLS，
+// 任何人拿前端公开的 anon key 就能读写全库（对应告警 rls_disabled_in_public /
+// sensitive_columns_exposed）。本项目前端只用 supabase-js 做登录（走 /auth/v1，不碰表），
+// 所有表访问都在服务端 → 可安全地「public 全表开 RLS（无策略=全拒）+ 收回 anon/authenticated 权限」。
+// 直连角色即建表者（owner），owner 不受 RLS 约束（未用 FORCE ROW LEVEL SECURITY），故应用不受影响。
+// 幂等，可重复执行；同步版本见 server/harden_public_rls.sql。
+const HARDEN_STMTS = [
+  `DO $$ DECLARE t record; BEGIN
+     FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+       EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t.tablename);
+     END LOOP;
+   END $$`,
+  `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon, authenticated`,
+  `REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated`,
+  `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated`,
+  `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated`
+];
+async function hardenPostgrestAccess(drv) {
+  try {
+    const row = await drv.get(`SELECT 1 AS ok FROM pg_roles WHERE rolname = 'anon'`);
+    if (!row) return; // 普通 Postgres（自建），没有 anon/authenticated 角色，无需处理
+  } catch (e) { return; }
+  for (const stmt of HARDEN_STMTS) {
+    try { await drv.exec(stmt); }
+    catch (e) { console.warn('[db] RLS 加固语句失败（已跳过，不影响启动）:', e.message); }
+  }
+  console.log('[db] 已加固 public：全部业务表开启 RLS，并收回 anon/authenticated 的 REST 访问权限');
+}
+
 // 创建并初始化驱动
 async function createDriver() {
   const type = config.DB.TYPE;
@@ -183,6 +214,9 @@ async function createDriver() {
 
   // 兼容旧库：为 sessions 补齐 unlocked 列（后续内容解锁标记）
   try { await drv.exec('ALTER TABLE sessions ADD COLUMN unlocked INTEGER DEFAULT 0'); } catch (e) { /* 列已存在，忽略 */ }
+
+  // Supabase：关闭 PostgREST 对业务表的匿名读写（告警 rls_disabled_in_public 修复）
+  if (type === 'postgres') await hardenPostgrestAccess(drv);
 
   const a = approvalSql(type);
   drv.upsertApproval = (shareId, viewerToken, status, requestedAt, resolvedAt) =>
