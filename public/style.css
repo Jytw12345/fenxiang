@@ -30,7 +30,7 @@ a{color:var(--brand);text-decoration:none;}
 .topbar{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 26px;background:rgba(255,255,255,.82);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10;}
 .crumb{font-size:13px;color:var(--muted);}.crumb b{color:var(--ink);}
 .top-right{display:flex;align-items:center;gap:14px;font-size:13px;color:var(--muted);}
-.wrap{padding:24px 26px 64px;max-width:1200px;width:100%;}
+.wrap{padding:24px 26px 64px;width:100%;}
 .page-title{font-size:21px;font-weight:800;margin:0 0 4px;letter-spacing:.2px;}
 .page-sub{color:var(--muted);font-size:13.5px;margin:0 0 22px;line-height:1.5;}
 
