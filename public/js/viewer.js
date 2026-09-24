@@ -502,7 +502,7 @@ function releaseRenderSlot() {
 function obsPages() {
   if (pageObs) pageObs.disconnect();
   if (!('IntersectionObserver' in window)) {          // 老浏览器兜底：顺序渲染（大文档会很慢，但至少能看）
-    for (let i = 1; i <= PDFV.limit; i++) queuePage(i, BASE_SCALE);
+    for (let i = 1; i <= PDFV.limit; i++) queuePage(i, pdfNeedScale());
     return;
   }
   pageObs = new IntersectionObserver((ents) => {
@@ -513,7 +513,7 @@ function obsPages() {
         const rec = PDFV.pages[i];
         if (rec && !rec.renderScale) {
           pdfPreSize(i);         // 进入预渲染带先按真实页尺寸修正占位，消除混合尺寸文档的渲染跳动
-          queuePage(i, BASE_SCALE);
+          queuePage(i, pdfNeedScale());
         }
       } else {
         PDFV.vis.delete(i);
@@ -582,8 +582,21 @@ function pdfCapScale(vp1, s) {
   return Math.max(0.1, Math.min(s, cap));
 }
 
+// ---- 栅格倍率按「当前显示倍率」反推（大文件能打开的关键）----
+// canvas 像素数 = 页面原始尺寸 × s，CSS 显示尺寸 = 页面原始尺寸 × display，
+// 所以 s/display 才是有效像素密度：想看着清晰，只需 s ≈ display × DPR。
+// 旧实现恒定按 BASE_SCALE(2) 栅格化，在超大页面上（工程图/长图海报适宽后 display 只有
+// 0.1~0.2）等于白算上百倍像素 —— 单页 canvas 逼近 200MB，浏览器分配失败后 render 直接
+// reject，表现就是「页面永远停在骨架」（大文件打不开、疑似内存不足的真因）。
+function pdfDpr() { return Math.min(2, Math.max(1, window.devicePixelRatio || 1)); }
+function pdfNeedScale() {
+  const d = PDFV.display || 1;
+  return Math.min(ZOOM_CFG.pdfCrispCap, Math.max(0.2, d * pdfDpr()));
+}
+
 // 按指定栅格倍率渲染某页；旋转通过 viewport 的 rotation 实现，canvas 尺寸随旋转互换，布局天然正确
-async function pdfRenderPage(i, scale) {
+// scale 缺省 = 当前显示需要的倍率；shrink 为失败降级重试的倍率折扣（0.5 = 砍半再试）
+async function pdfRenderPage(i, scale, shrink) {
   if (!PDFV.doc) return;
   let rec = PDFV.pages[i];
   if (!rec) rec = await pdfMakePage(i);
@@ -592,15 +605,28 @@ async function pdfRenderPage(i, scale) {
   const vp1 = rec.page.getViewport({ scale: 1, rotation: rot });
   rec.vp1 = vp1;
   rec.baseW = vp1.width; rec.baseH = vp1.height;
-  const s = pdfCapScale(vp1, scale || BASE_SCALE);   // 超大页钳制到 GPU 安全范围，否则手机上只渲染出上半页
+  // 超大页钳制到 GPU 安全范围（否则手机上只渲染出上半页），再按显示需要取小者
+  const s = pdfCapScale(vp1, (scale || pdfNeedScale()) * (shrink || 1));
   const vp = rec.page.getViewport({ scale: s, rotation: rot });
   rec.canvas.width = Math.ceil(vp.width);
   rec.canvas.height = Math.ceil(vp.height);
   rec.renderScale = s;
   pdfSizePage(rec);
+  clearPageFailed(rec);                                 // 重试路径：先撤掉上一轮的失败提示
+  let task = null;
   try {
-    await rec.page.render({ canvasContext: rec.canvas.getContext('2d'), viewport: vp }).promise;
-  } catch (e) { rec.renderScale = 0; return; }
+    task = rec.page.render({ canvasContext: rec.canvas.getContext('2d'), viewport: vp });
+    await task.promise;
+  } catch (e) {
+    try { if (task) task.cancel(); } catch (_) {}
+    rec.renderScale = 0;
+    rec.canvas.width = 1; rec.canvas.height = 1;
+    // 失败多半是单页像素过大（canvas 分配不出显存/内存）→ 砍半再试一次；
+    // 仍失败就给出明确提示，不让用户对着永久骨架猜「是不是还在加载」。
+    if (!shrink && s > 0.25) return pdfRenderPage(i, scale, 0.5);
+    markPageFailed(rec);
+    return;
+  }
   rec.wrap.classList.add('done');   // 渲染完成：隐藏占位骨架
   PDFV.rendered.add(i);
   // 翻页预渲染：当前页仍在可视区时预渲下一页（vis 判断防止连环预渲把整本渲完）
@@ -609,6 +635,24 @@ async function pdfRenderPage(i, scale) {
   }
   // 惰性渲染下，搜索命中的页往往是「渲染完成后」才拿到 vp1，这里补绘一次高亮，否则高亮会丢
   if (PDFV.hits.length) pdfRefreshHl();
+}
+// 像素过大渲不出来的页：撤骨架 + 出一行说明（否则用户只会看到无限加载的灰块）
+function markPageFailed(rec) {
+  if (!rec || !rec.wrap) return;
+  rec.wrap.classList.add('done', 'failed');
+  if (!rec.wrap.querySelector('.pg-msg')) {
+    const m = document.createElement('div');
+    m.className = 'pg-msg';
+    m.innerHTML = '本页内容过大，浏览器无法渲染<br><span>可点击底部「下载」获取原文件</span>';
+    rec.wrap.appendChild(m);
+  }
+  if (rec.hl) rec.hl.innerHTML = '';
+}
+function clearPageFailed(rec) {
+  if (!rec || !rec.wrap) return;
+  rec.wrap.classList.remove('failed');
+  const m = rec.wrap.querySelector('.pg-msg');
+  if (m) m.remove();
 }
 function pdfSizePage(rec) {
   rec.canvas.style.width = Math.round(rec.baseW * PDFV.display) + 'px';
@@ -709,7 +753,7 @@ async function loadPdfFromUrl(src, failMsg) {
     setTimeout(() => { if (PDFV.autoFit) pdfFitWidth(); }, 400);
     buildThumbs();          // 缩略图立刻可用，不必等页面渲染完
     obsPages();             // 惰性渲染可见页
-    queuePage(1, BASE_SCALE);
+    queuePage(1, pdfNeedScale());
     pdfTrackPage();
     hideDocLoading();       // 占位页已铺好、第一页开始渲染：撤掉整层提示，未渲完的页由骨架动画接管
 }
@@ -853,8 +897,7 @@ async function saveDoc() {
 const ZOOM_CFG = {
   min: 0.5,                 // 最小显示倍率（缩小下限）
   max: 4,                   // 最大显示倍率（放大上限）
-  pdfBaseScale: 2,          // PDF 栅格化基准倍率（≈144DPI；越大越清晰但越占带宽）
-  pdfCrispCap: 4,           // PDF 放大时按需重渲染的最高栅格倍率（决定放大后是否糊）
+  pdfCrispCap: 4,           // 最高栅格倍率：放大到多少倍就按需重渲，同时是单页内存上限
   pdfCrispMargin: 0.2,      // 清晰度判定余量（renderScale 达到 need-margin 即视为够清晰）
   pdfCrispDebounce: 220,    // 停止缩放后多久重渲染可见页（ms）
   stepIn: 1.25,             // 工具条「+」按钮倍率步进
@@ -864,7 +907,6 @@ const ZOOM_CFG = {
   dblClickToggle: 2,        // 图片双击在 1× 与该值之间切换
   thumbScale: 0.22,         // 缩略图栅格化倍率
 };
-const BASE_SCALE = ZOOM_CFG.pdfBaseScale;
 const MIN_DISP = ZOOM_CFG.min, MAX_DISP = ZOOM_CFG.max;
 let crispTimer = null;
 let zbar = null;
@@ -909,7 +951,7 @@ function zoomFit() { if (zoomMode === 'pdf') pdfFitWidth(); else if (zoomMode ==
 function pdfEnsureCrisp() {
   if (crispTimer) clearTimeout(crispTimer);
   crispTimer = setTimeout(async () => {
-    const needBase = Math.min(ZOOM_CFG.pdfCrispCap, BASE_SCALE * PDFV.display);
+    const needBase = pdfNeedScale();
     // 只处理「当前在可视区」的页：旧实现对每一页都做 getBoundingClientRect，
     // 791 页时每次缩放要读近 800 次布局 —— 换成观察器维护的可见页集合后基本零成本。
     let list = Array.from(PDFV.vis || []);
@@ -922,7 +964,9 @@ function pdfEnsureCrisp() {
       // need 按每页实际尺寸钳制：超大页受 GPU 上限截断后 renderScale 达不到原始 need，
       // 不钳制会导致每次缩放后都对该页反复重渲
       const need = pdfCapScale(rec.vp1, needBase);
-      if (rec.renderScale >= need - ZOOM_CFG.pdfCrispMargin) continue;
+      // 够清晰就跳过；但若当前 canvas 远超所需（例如从 400% 缩回适宽后仍挂着高分辨率像素），
+      // 也重渲一次把像素降下来还内存。阈值放到 3 倍，正常缩放（≤3× 超采样）不会来回重渲、不闪。
+      if (rec.renderScale >= need - ZOOM_CFG.pdfCrispMargin && rec.renderScale <= need * 3) continue;
       await queuePage(i, need);
     }
     pdfRefreshHl();                                       // 高亮坐标依赖显示倍率，缩放后统一重绘
@@ -1156,13 +1200,26 @@ function queueThumb(i) {
   t.done = true;
   thumbQ = thumbQ.then(() => renderThumb(i)).catch(() => {});
 }
+// 缩略图目标宽度：按抽屉实际可用宽取，而不是页面原始尺寸 × thumbScale。
+// 工程图/海报类超大页面按 0.22 倍会给每张缩略图分配上百万像素（单张几 MB~十几 MB），
+// 抽屉里同时挂着十几张就白耗几十 MB —— 固定到面板宽度后每张只要 ~0.3MB。
+let thumbWCache = 0;
+function thumbFitWidth() {
+  if (thumbWCache) return thumbWCache;
+  const el = $('#tList');
+  const w = el ? el.clientWidth - 14 : 0;         // 减去 .titem 的 padding/border 余量
+  thumbWCache = Math.min(320, Math.max(96, w || 180));
+  return thumbWCache;
+}
 async function renderThumb(i) {
   const t = PDFV.thumbs[i];
   if (!t || !t.done) return;                    // 已被释放/重排队则跳过这次渲染
   const rec = PDFV.pages[i];
   const pg = (rec && rec.page) || await PDFV.doc.getPage(i);
   const rot = ((pg.rotate || 0) + PDFV.rot) % 360;
-  const vp = pg.getViewport({ scale: ZOOM_CFG.thumbScale, rotation: rot });
+  const vp0 = pg.getViewport({ scale: 1, rotation: rot });
+  const ts = Math.min(ZOOM_CFG.thumbScale, thumbFitWidth() / Math.max(1, vp0.width));
+  const vp = pg.getViewport({ scale: ts, rotation: rot });
   t.canvas.width = Math.ceil(vp.width);
   t.canvas.height = Math.ceil(vp.height);
   t.canvas.style.aspectRatio = Math.ceil(vp.width) + ' / ' + Math.ceil(vp.height);
@@ -1177,7 +1234,7 @@ function releaseThumb(i) {
   t.canvas.width = 1; t.canvas.height = 1;   // 只回收像素内存；aspect-ratio 仍撑着占位高度，不会跳版
   t.done = false;
 }
-function rebuildThumbs() { buildThumbs(); }
+function rebuildThumbs() { thumbWCache = 0; buildThumbs(); }   // 抽屉宽度可能随窗口变，缓存要清
 function openThumbs() {
   const pane = $('#tPane');
   pane.classList.add('open');
