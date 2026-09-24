@@ -33,7 +33,12 @@
      那一小块变大）。去掉上限后内容区用满整屏，PDF「适宽」随之放大到实际可用宽度。
      窄屏本来就够不到 900px，行为不变。 */
   #viewer { padding: 18px; }
-  #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  /* 放大后 canvas 会宽过容器。若靠 flex 的 align-items:center 居中一个比容器宽的子元素，
+     左侧溢出部分按规范无法被 overflow 滚动到（右侧可以）→ 表现为"能拖到右边缘、拖不到左边缘"。
+     改为让 #pages 宽度跟随内容（fit-content，未超宽时至少撑满 100%），居中交给 margin:auto：
+     未放大时仍是 100% 居中（与旧行为一致）；放大后 #pages 跟着变宽、溢出转到 #pdfStage，
+     横向滚动（原生滚动条 + grab 拖移 + 触屏横滑）就能完整覆盖左右边缘。 */
+  #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; width: fit-content; min-width: 100%; margin: 0 auto; }
   #pages canvas { max-width: 100%; height: auto; box-shadow: 0 2px 10px rgba(0,0,0,.12); background:#fff; }
   .docx-body { background:#fff; padding: 28px 34px; border-radius: 8px; box-shadow:0 2px 10px rgba(0,0,0,.08); max-width: 820px; margin: 0 auto; }
   .docx-body img { max-width: 100%; }
