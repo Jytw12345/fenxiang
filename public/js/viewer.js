@@ -596,10 +596,19 @@ async function pdfMakePage(i) {
 // 桌面端上限宽松些，但图片型 PDF（画册/海报，每页嵌大图）逐页解码本身就很吃内存，
 // 并发 2 页同时解码容易把内存顶到峰值 → 这里把桌面单页位图总面积从约 144MB 收到约 96MB，
 // 放大到极限时峰值内存更低、更远离「内存爆/空白屏」；按需缩放下肉眼几乎看不出差别。
-const GPU_CAP = (function () {
-  const coarse = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
-  return coarse ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 24e6 };
-})();
+function isCoarsePointer() {
+  return (window.matchMedia && matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+}
+const GPU_CAP = isCoarsePointer() ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 24e6 };
+// 单张位图的纹理上限（图片预览用，与 GPU_CAP 同源）：手机 4096 边长 / 16.7M 像素，桌面 8192 / 32M。
+// ⚠️ 别再用写死的 8192/32M：5032×3437（17.3M 像素、解码后 69MB）这类"桌面安全、手机超限"的图会被
+// 误判成安全 → 前端不去要后端降采样 → 手机直接吃整张超大位图，表现为「只显示一部分 + 拖动时大片
+// 空白、画面乱跳」（移动端 GPU 单张纹理装不下，超出的部分直接不渲染）。
+const IMG_CAP = isCoarsePointer() ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 32e6 };
+function imgOversize(nw, nh) {
+  if (!nw || !nh) return false;
+  return nw > IMG_CAP.side || nh > IMG_CAP.side || nw * nh > IMG_CAP.area;
+}
 function pdfCapScale(vp1, s) {
   if (!vp1 || !vp1.width || !vp1.height) return s;
   let cap = GPU_CAP.side / Math.max(vp1.width, vp1.height);              // 每边上限
@@ -1675,6 +1684,9 @@ function sizeStage() {
 // 竖长图模式（高/宽 > 2.2 且高度适配后过窄）：宽度撑满 + 容器高度=图片视觉高度（页面纵向滚动），
 // 触摸纵向滑动交给页面滚动（像朋友圈长图），横向仍可拖移，双指捏合缩放保留
 let imgLongMode = false;
+// 上次「适配窗口」时的视口宽度：用于区分「转屏/改窗口」（宽度变）与「手机滚动时地址栏收起/展开」
+// （只有 innerHeight 变）——后者不该触发重新适配，否则用户一滚动画面就被重置回初始缩放与位置。
+let imgLastFitW = 0;
 function imgFit() {
   if (!imgStage || !imgContent) return;
   const av = stageAvail();
@@ -1696,6 +1708,7 @@ function imgFit() {
   // 缩放范围跟随适宽结果（下限留一半余量；上限到 1× 原图像素即够看细节）
   imgMinScale = Math.min(ZOOM_CFG.min, imgScale * 0.5);
   imgMaxScale = Math.min(ZOOM_CFG.max, Math.max(1, imgScale * 8));
+  imgLastFitW = window.innerWidth;   // 记住本次适配的视口宽度（resize 时用来判断是否需要重新适配）
   sizeStage();
   imgX = 0; imgY = 0;
   imgClamp(); imgApply();
@@ -1735,7 +1748,7 @@ function enableImageZoom(imgEl) {
     if (usingDownscaled) return;
     const nw = imgEl.naturalWidth, nh = imgEl.naturalHeight;
     if (!nw || !nh) return;
-    if (nw <= 8192 && nh <= 8192 && nw * nh <= 32e6) return;   // 安全区内，无需处理
+    if (!imgOversize(nw, nh)) return;   // 在当前设备的纹理安全区内，无需处理
     usingDownscaled = true;
     const tip = document.createElement('div');
     tip.className = 'img-loading';
@@ -1794,8 +1807,19 @@ function enableImageZoom(imgEl) {
     if (e.touches.length === 1) last = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   });
   imgStage.addEventListener('dblclick', () => imgSetScale(imgScale > 1.05 ? 1 : ZOOM_CFG.dblClickToggle));
-  // 转屏/改窗口尺寸后重新适配窗口（手机横竖切换常见），保持图片始终可见
-  window.addEventListener('resize', () => { if (zoomMode === 'image' && imgStage && imgStage.isConnected) imgFit(); });
+  // 转屏/改窗口尺寸后重新适配窗口（手机横竖切换常见），保持图片始终可见。
+  // ⚠️ 手机上滚动时地址栏收起/展开同样会触发 resize（只有 innerHeight 变），旧实现无条件
+  // imgFit() → 用户一拖动/滚动，缩放与位置就被重置回初始态，看起来就是「内容乱跳」。
+  // 因此只在「视口宽度真的变了」（转屏、改窗口大小）时才重新适配，并做去抖。
+  let imgRzTimer = 0;
+  window.addEventListener('resize', () => {
+    if (zoomMode !== 'image' || !imgStage || !imgStage.isConnected) return;
+    if (Math.abs(window.innerWidth - imgLastFitW) < 60) return;
+    clearTimeout(imgRzTimer);
+    imgRzTimer = setTimeout(() => {
+      if (zoomMode === 'image' && imgStage && imgStage.isConnected) imgFit();
+    }, 160);
+  });
 }
 function touchDist(e) { const a = e.touches[0], b = e.touches[1]; return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
 function touchMid(e) { const a = e.touches[0], b = e.touches[1]; return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }; }
