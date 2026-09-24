@@ -29,7 +29,10 @@
 </script>
 <link rel="stylesheet" href="/style.css" />
 <style>
-  #viewer { max-width: 900px; margin: 0 auto; padding: 18px; }
+  /* 宽屏铺满：原先 max-width:900px 会把预览锁在屏幕正中一小块（1920 屏仅占 47%，放大也只是
+     那一小块变大）。去掉上限后内容区用满整屏，PDF「适宽」随之放大到实际可用宽度。
+     窄屏本来就够不到 900px，行为不变。 */
+  #viewer { padding: 18px; }
   #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; }
   #pages canvas { max-width: 100%; height: auto; box-shadow: 0 2px 10px rgba(0,0,0,.12); background:#fff; }
   .docx-body { background:#fff; padding: 28px 34px; border-radius: 8px; box-shadow:0 2px 10px rgba(0,0,0,.08); max-width: 820px; margin: 0 auto; }

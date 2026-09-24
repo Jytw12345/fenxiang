@@ -425,6 +425,7 @@ const PDFV = {
   rot: 0,                 // 用户叠加旋转 0/90/180/270（与页面自带旋转相加）
   view: 'single',         // single | double | book
   display: 1,
+  autoFit: true,          // 当前倍数是否来自「适宽」（窗口变化时自动重算；手动缩放后置 false）
   pages: [],              // [i] = {page, wrap, canvas, hl, renderScale, baseW, baseH, vp1}
   thumbs: [],             // [i] = {el, canvas, done}
   text: null,             // [i] = {str, items:[{start,end,it}]}
@@ -702,6 +703,10 @@ async function loadPdfFromUrl(src, failMsg) {
       }
     }
     pdfFitWidth();          // 初始进入自动适应宽度（手机竖屏下比 100% 更好用）
+    // 首次适宽的宽度可能取自「窗口竖向滚动条还没出现」的瞬间（页面铺完才占掉 15px），
+    // 结果会差十几 px（宽屏表现为右侧露出一条横向滚动）。渲染稳定后再校正一次；
+    // 用户若已手动缩放（autoFit=false）则不打扰。
+    setTimeout(() => { if (PDFV.autoFit) pdfFitWidth(); }, 400);
     buildThumbs();          // 缩略图立刻可用，不必等页面渲染完
     obsPages();             // 惰性渲染可见页
     queuePage(1, BASE_SCALE);
@@ -924,7 +929,10 @@ function pdfEnsureCrisp() {
     pdfTrackPage();
   }, ZOOM_CFG.pdfCrispDebounce);
 }
-function pdfSetDisplay(v) {
+function pdfSetDisplay(v, auto) {
+  // auto=true 表示这次是「适宽」算出来的倍数（窗口尺寸变化时允许自动重算）；
+  // 用户手动放大/缩小/滚轮/捏合走 auto 缺省 undefined → 记为手动，之后不再被 resize 自动覆盖。
+  PDFV.autoFit = !!auto;
   // 上下限都用动态值：超大文档适宽可能远低于 0.5，硬上下限会让"适宽后一缩小反而变大 / 放大没尽头"
   PDFV.display = Math.min(PDFV.maxDisp || MAX_DISP, Math.max(PDFV.minDisp || MIN_DISP, v));
   $('#pages').classList.add('zoomed');
@@ -950,7 +958,7 @@ function pdfFitWidth() {
   // 避免"适宽 8% 后还能一路放大到 400%"这种没有尽头的跨度
   PDFV.minDisp = Math.min(MIN_DISP, disp * 0.5);
   PDFV.maxDisp = Math.min(MAX_DISP, Math.max(1, disp * 8));
-  pdfSetDisplay(disp);
+  pdfSetDisplay(disp, true);
 }
 function initPdfReader() {
   zoomMode = 'pdf';
@@ -1045,6 +1053,14 @@ window.addEventListener('scroll', () => {
   trackRaf = requestAnimationFrame(() => { trackRaf = 0; pdfTrackPage(); sweepReleased(); });
 }, { passive: true });
 window.addEventListener('resize', () => { pdfTrackPage(); });
+// 窗口尺寸变化（拉大窗口 / 外接显示器 / 关掉侧栏）后，仍处于「适宽」状态就重新适配：
+// 否则内容停在旧倍数，宽屏右侧是一大片空白。用户手动缩放过（PDFV.autoFit=false）则不打扰。
+let refitTimer = 0;
+window.addEventListener('resize', () => {
+  if (zoomMode !== 'pdf' || !PDFV.autoFit) return;
+  clearTimeout(refitTimer);
+  refitTimer = setTimeout(() => { if (PDFV.autoFit) pdfFitWidth(); }, 140);
+});
 
 function pdfGoPage(n, smooth) {
   n = Math.max(1, Math.min(PDFV.total, Math.round(n) || 1));
