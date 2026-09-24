@@ -590,15 +590,15 @@ async function pdfMakePage(i) {
   return PDFV.pages[i];
 }
 
-// ---- 移动端 GPU 画布安全上限 ----
+// ---- 移动端 / 大文件 GPU 画布安全上限 ----
 // 手机 GPU 单张纹理有硬上限（iOS ≈ 16.7M 总像素、每边 4096~8192；Android 每边 8192~16384）。
 // 超限的 canvas 只有上半部分能渲染、下半空白 —— 「高清大文件手机端只显示一半」的根因。
-// 渲染任何一页前必须把栅格倍率钳制到安全范围；桌面端上限宽松些，但总面积仍按「单页位图
-// 不超过约 144MB」保守取值：超大页面在高倍率下一张 canvas 就能吃掉 200MB，低配机器直接
-// 分配失败 → 页面永久空白。降一点密度换「一定打得开」，肉眼在按需缩放下几乎看不出差别。
+// 桌面端上限宽松些，但图片型 PDF（画册/海报，每页嵌大图）逐页解码本身就很吃内存，
+// 并发 2 页同时解码容易把内存顶到峰值 → 这里把桌面单页位图总面积从约 144MB 收到约 96MB，
+// 放大到极限时峰值内存更低、更远离「内存爆/空白屏」；按需缩放下肉眼几乎看不出差别。
 const GPU_CAP = (function () {
   const coarse = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
-  return coarse ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 36e6 };
+  return coarse ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 24e6 };
 })();
 function pdfCapScale(vp1, s) {
   if (!vp1 || !vp1.width || !vp1.height) return s;
@@ -655,6 +655,7 @@ async function pdfRenderPage(i, scale, shrink) {
   rec.wrap.classList.add('done');   // 渲染完成：隐藏占位骨架
   clearPageFailed(rec);             // 兜底：若看门狗已误标失败（极慢设备渲染>12s 才出图），这里撤掉失败提示
   PDFV.rendered.add(i);
+  pdfRenderProgress();          // 首屏逐页渲染期间实时更新「正在渲染第 N 页」进度
   // 翻页预渲染：当前页仍在可视区时预渲下一页（vis 判断防止连环预渲把整本渲完）。
   // 放大状态（need ≥ 2）下不预渲：单页画布已经很重，且放大后一屏装不下两页，预渲纯属浪费内存。
   if (s < 2 && PDFV.vis && PDFV.vis.has(i) && i + 1 <= PDFV.total && PDFV.pages[i + 1] && !PDFV.rendered.has(i + 1)) {
@@ -674,12 +675,26 @@ function markPageFailed(rec) {
     rec.wrap.appendChild(m);
   }
   if (rec.hl) rec.hl.innerHTML = '';
+  pdfRenderProgress();          // 失败页也计入首屏完成判定，避免提示因一页卡死而永久遮挡
 }
 function clearPageFailed(rec) {
   if (!rec || !rec.wrap) return;
   rec.wrap.classList.remove('failed');
   const m = rec.wrap.querySelector('.pg-msg');
   if (m) m.remove();
+}
+// 首屏逐页渲染期间，盖在内容上的加载提示要实时反映进度，否则大文件会像「卡死 / 内存爆」；
+// 首屏可见页（PDFV.vis）全部渲染完成或判失败即撤掉提示，未渲完的后续页交给骨架动画（阅读器常态）。
+function pdfRenderProgress() {
+  if (!docLoadingEl) return;                         // 提示已撤，无需再更新
+  const done = PDFV.rendered.size;
+  const total = PDFV.limit || PDFV.total;
+  if (PDFV.vis && PDFV.vis.size > 0) {              // 首屏可见页都「done」（含判失败的页）即揭示内容
+    let pending = 0;
+    PDFV.vis.forEach((i) => { const r = PDFV.pages[i]; if (!r || !r.wrap.classList.contains('done')) pending++; });
+    if (pending === 0) { hideDocLoading(); return; }
+  }
+  updateDocLoading('正在渲染文档… 已就绪 ' + done + ' / ' + total + ' 页');
 }
 function pdfSizePage(rec) {
   rec.canvas.style.width = Math.round(rec.baseW * PDFV.display) + 'px';
@@ -782,7 +797,10 @@ async function loadPdfFromUrl(src, failMsg) {
     obsPages();             // 惰性渲染可见页
     queuePage(1, pdfNeedScale());
     pdfTrackPage();
-    hideDocLoading();       // 占位页已铺好、第一页开始渲染：撤掉整层提示，未渲完的页由骨架动画接管
+    // 占位页已铺好、首屏页开始渲染：不立即撤提示，改为实时「正在渲染第 N 页」进度（见 pdfRenderProgress），
+    // 让大文件加载期有反馈、不再像内存爆 / 卡死；首屏可见页渲染完即自动撤掉。
+    updateDocLoading('正在渲染文档…');
+    setTimeout(() => hideDocLoading(), 12000);       // 兜底：极端情况下提示也应在有限时间撤掉，绝不永久遮挡
 }
 
 // PPT：后端 LibreOffice 转 PDF 后按 PDF 查看器打开（缩放/拖移/试看/水印全套复用）。
