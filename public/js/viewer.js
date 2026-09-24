@@ -486,18 +486,21 @@ function pdfBuildPages(from, to) {
   }
 }
 let pageObs = null;
-// 渲染并发槽：pdf.js 各页 render 相互独立，并发 2 让首屏多页/快速滚动出图更快；
-// 单页内存上限已在 pdfRenderPage 内按 GPU 上限钳制，并发不会放大峰值内存。
+// 渲染并发槽：pdf.js 各页 render 相互独立，并发 2 让首屏多页/快速滚动出图更快。
+// 但放大后单页画布会变得很大（超大页面在高倍率下可达上百 MB），此时两页同时分配容易把
+// 内存顶到峰值 → 高倍率改为串行。低倍率（默认浏览状态）仍并发 2，首屏速度不受影响。
 const RENDER_CONCURRENCY = 2;
+function renderSlots() { return pdfNeedScale() >= 1.2 ? 1 : RENDER_CONCURRENCY; }
 let renderInFlight = 0;
 const renderWaiters = [];
 function acquireRenderSlot() {
-  if (renderInFlight < RENDER_CONCURRENCY) { renderInFlight++; return Promise.resolve(); }
+  if (renderInFlight < renderSlots()) { renderInFlight++; return Promise.resolve(); }
   return new Promise(r => renderWaiters.push(r));
 }
 function releaseRenderSlot() {
   const w = renderWaiters.shift();
-  if (w) w(); else renderInFlight--;
+  if (w) w();                                        // 有等待者就放行下一个，不会下溢
+  else if (renderInFlight > 0) renderInFlight--;      // 仅防双释放/下溢：看门狗与正常收尾只应释放一次
 }
 function obsPages() {
   if (pageObs) pageObs.disconnect();
@@ -552,7 +555,27 @@ function queuePage(i, scale) {
   const rec = PDFV.pages[i]; if (!rec) return Promise.resolve();
   if (rec._busy) return Promise.resolve();
   rec._busy = true;
-  return acquireRenderSlot().then(() => pdfRenderPage(i, scale)).catch(() => {}).then(() => { rec._busy = false; releaseRenderSlot(); });
+  rec._wd = false;                                   // 本轮是否已通过看门狗释放过槽，防双释放
+  if (rec._watch) { clearTimeout(rec._watch); rec._watch = null; }
+  return acquireRenderSlot().then(() => {
+    // 槽已占用后启动看门狗：某页若 12s 仍停在骨架（渲染卡死/解析挂起），判定失败并显式标记，
+    // 不让用户对着"一直正在加载"的空白屏无限等 —— 这是根治大文件空白屏的兜底路径。
+    rec._watch = setTimeout(() => {
+      rec._watch = null;
+      const r = PDFV.pages[i];
+      if (r && !r.wrap.classList.contains('done') && !r.wrap.classList.contains('failed')) markPageFailed(r);
+      if (!rec._wd) { rec._wd = true; releaseRenderSlot(); }   // 兜底释放并发槽，防整本文档被这一页拖死
+      rec._busy = false;
+    }, 12000);
+    return pdfRenderPage(i, scale);
+  }).catch((e) => {
+    // getPage 解析失败等任何未预料异常：显式标记失败，绝不让它静默停在骨架（旧代码此处 swallow 了）
+    const r = PDFV.pages[i]; if (r) markPageFailed(r);
+  }).then(() => {
+    if (rec._watch) { clearTimeout(rec._watch); rec._watch = null; }
+    if (!rec._wd) releaseRenderSlot();               // 正常收尾释放（看门狗已释放则跳过）
+    rec._busy = false;
+  });
 }
 
 async function pdfMakePage(i) {
@@ -570,10 +593,12 @@ async function pdfMakePage(i) {
 // ---- 移动端 GPU 画布安全上限 ----
 // 手机 GPU 单张纹理有硬上限（iOS ≈ 16.7M 总像素、每边 4096~8192；Android 每边 8192~16384）。
 // 超限的 canvas 只有上半部分能渲染、下半空白 —— 「高清大文件手机端只显示一半」的根因。
-// 渲染任何一页前必须把栅格倍率钳制到安全范围；桌面端上限宽松得多。
+// 渲染任何一页前必须把栅格倍率钳制到安全范围；桌面端上限宽松些，但总面积仍按「单页位图
+// 不超过约 144MB」保守取值：超大页面在高倍率下一张 canvas 就能吃掉 200MB，低配机器直接
+// 分配失败 → 页面永久空白。降一点密度换「一定打得开」，肉眼在按需缩放下几乎看不出差别。
 const GPU_CAP = (function () {
   const coarse = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
-  return coarse ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 67e6 };
+  return coarse ? { side: 4096, area: 16.7e6 } : { side: 8192, area: 36e6 };
 })();
 function pdfCapScale(vp1, s) {
   if (!vp1 || !vp1.width || !vp1.height) return s;
@@ -628,9 +653,11 @@ async function pdfRenderPage(i, scale, shrink) {
     return;
   }
   rec.wrap.classList.add('done');   // 渲染完成：隐藏占位骨架
+  clearPageFailed(rec);             // 兜底：若看门狗已误标失败（极慢设备渲染>12s 才出图），这里撤掉失败提示
   PDFV.rendered.add(i);
-  // 翻页预渲染：当前页仍在可视区时预渲下一页（vis 判断防止连环预渲把整本渲完）
-  if (PDFV.vis && PDFV.vis.has(i) && i + 1 <= PDFV.total && PDFV.pages[i + 1] && !PDFV.rendered.has(i + 1)) {
+  // 翻页预渲染：当前页仍在可视区时预渲下一页（vis 判断防止连环预渲把整本渲完）。
+  // 放大状态（need ≥ 2）下不预渲：单页画布已经很重，且放大后一屏装不下两页，预渲纯属浪费内存。
+  if (s < 2 && PDFV.vis && PDFV.vis.has(i) && i + 1 <= PDFV.total && PDFV.pages[i + 1] && !PDFV.rendered.has(i + 1)) {
     queuePage(i + 1, s);
   }
   // 惰性渲染下，搜索命中的页往往是「渲染完成后」才拿到 vp1，这里补绘一次高亮，否则高亮会丢
