@@ -247,8 +247,11 @@
     if (t) t.textContent = PW_LABEL[lv];
   }
 
-  window.openLoginModal = open;
-  window.closeLoginModal = close;
+window.openLoginModal = open;
+window.closeLoginModal = close;
+// 供「创建分享」页内登录闸门复用（admin.js gateLogin）：复用同一条登录链路
+// （Supabase / 本地两条路径）与同一套中文报错映射，避免出现第二份登录逻辑。
+window.ayPerformLogin = performLogin;
 
   if (modal) {
     document.getElementById('loginSubmit').addEventListener('click', submit);

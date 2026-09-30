@@ -33,6 +33,10 @@ a{color:var(--brand);text-decoration:none;}
 .wrap{padding:24px 26px 64px;width:100%;}
 .page-title{font-size:21px;font-weight:800;margin:0 0 4px;letter-spacing:.2px;}
 .page-sub{color:var(--muted);font-size:13.5px;margin:0 0 22px;line-height:1.5;}
+/* 备案号页脚（合规悬挂）：全部走主题变量，深色主题自动适配；桌面端随 .main 缩进避开左栏 */
+.site-beian{margin-top:auto;text-align:center;font-size:12px;line-height:1;color:var(--muted);padding:12px 16px;border-top:1px solid var(--line);background:var(--panel);}
+.site-beian a{color:var(--muted);text-decoration:none;}
+.site-beian a:hover{color:var(--brand);text-decoration:underline;}
 
 /* ===== 上传区（紧凑水平布局） ===== */
 .hero{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;box-shadow:var(--shadow-sm);margin-bottom:10px;}
@@ -122,6 +126,12 @@ input:disabled,select:disabled{background:#f3f4f6;color:#9ca3af;cursor:not-allow
 .tile .wm-textwrap{display:flex;flex-direction:column;gap:4px;}
 .tile .wm-textwrap input{font-size:12px;padding:6px 9px;border-radius:8px;}
 .tile .wm-textwrap .wm-hint{margin-top:0;}
+
+/* 创建分享登录闸门（未登录访客）：只给已登录账号看创建表单，未登录一律显示这张登录卡。
+   字段沿用 .inp，标签样式不依赖 .tiles 作用域（闸门在 .tiles 之外） */
+#createGate{max-width:400px;margin:26px auto 60px;}
+#createGate .pfield > label{display:block;font-size:11.5px;font-weight:600;color:var(--muted);margin-bottom:4px;}
+#createGate .inp{height:36px;font-size:13px;border-radius:9px;}
 
 /* 创建分享页（仅桌面）：紧凑分栏，7 张卡压成 2 行、行内等高对齐、总高约减半；
    手机/窄屏沿用下方原有单列样式，不受影响 */
@@ -566,6 +576,68 @@ th{color:var(--muted);font-weight:600;}
   .modal .box.login-box{max-width:100%;border-radius:16px;}
   .lg-main{padding:16px 15px 14px;}
   .lg-head h2{font-size:18px;}
+}
+
+/* ============================================================
+   全站准入：整页登录（body.auth-gate）/ 待管理员分配（body.pending-on）
+   —— 未登录访客只看登录页；已登录但未分配门店+身份的账号只看等待页。
+   两者都隐藏 app 主体（.side/.main），只留一张居中卡片 + 备案页脚。
+   注意：本块必须留在 style.css 中段（末尾是主题变量块 + mtab 媒体查询，勿上移/勿追加到末尾）。
+   ============================================================ */
+body.auth-gate,body.pending-on{
+  background:
+    radial-gradient(1000px 520px at 8% -10%, var(--brand-xl) 0%, transparent 62%),
+    radial-gradient(820px 460px at 108% 112%, var(--brand-xl) 0%, transparent 58%),
+    var(--bg);
+}
+body.auth-gate .side,body.auth-gate .main,
+body.pending-on .side,body.pending-on .main{ display:none !important; }
+
+/* 登录弹窗在全页模式下变成「登录页」：去掉遮罩层，铺满视口并垂直居中。
+   带 id 的权重高于 .modal/.modal.show，即使 done()/close() 移除 .show 也不会闪没了 */
+body.auth-gate #loginModal{
+  position:static; inset:auto; background:transparent; z-index:auto;
+  display:flex; align-items:center; justify-content:center;
+  min-height:100vh; padding:40px 20px 64px;
+}
+body.auth-gate #loginModal .box.login-box{ max-width:820px; box-shadow:0 26px 64px rgba(31,41,55,.16); }
+body.auth-gate #loginClose{ display:none; }
+
+/* 整页状态下的备案页脚（app 内那条 .site-beian 随 .main 一起被隐藏） */
+.auth-beian{ position:fixed; left:0; right:0; bottom:0; z-index:5; display:none; }
+body.auth-gate .auth-beian,body.pending-on .auth-beian{ display:block; }
+
+/* ---- 等待管理员分配 ---- */
+.pending-gate{ position:fixed; inset:0; z-index:60; display:none; align-items:center; justify-content:center;
+  padding:24px 20px 60px;
+  background:
+    radial-gradient(1000px 520px at 8% -10%, var(--brand-xl) 0%, transparent 62%),
+    radial-gradient(820px 460px at 108% 112%, var(--brand-xl) 0%, transparent 58%),
+    var(--bg); }
+.pending-card{ background:var(--panel); border:1px solid var(--line); border-radius:20px; box-shadow:var(--shadow);
+  max-width:470px; width:100%; padding:34px 30px 28px; text-align:center; }
+.pending-ic{ width:64px; height:64px; margin:0 auto 16px; border-radius:20px; display:flex; align-items:center; justify-content:center;
+  background:var(--brand-xl); color:var(--brand); }
+.pending-card h2{ margin:0 0 10px; font-size:20px; font-weight:800; letter-spacing:.3px; }
+.pending-card > p.sub{ margin:0 0 18px; line-height:1.75; }
+.pending-card > p.sub b{ color:var(--ink); }
+.pending-acct{ display:flex; flex-direction:column; gap:3px; align-items:center;
+  background:var(--field-bg); border:1px solid var(--line); border-radius:13px; padding:11px 14px; margin:0 0 20px; }
+.pending-acct b{ font-size:14px; color:var(--ink); word-break:break-all; line-height:1.4; }
+.pending-acts{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+.pending-tip{ margin:16px 0 0; font-size:12px; display:flex; align-items:center; justify-content:center; gap:7px; }
+.pending-tip::before{ content:''; width:7px; height:7px; border-radius:50%; background:var(--brand); flex:0 0 auto;
+  animation:pkPulse 1.5s ease-in-out infinite; }
+.pending-tip.busy::before{ animation-duration:.7s; }
+@keyframes pkPulse{ 0%,100%{ opacity:.25; } 50%{ opacity:1; } }
+@media (prefers-reduced-motion:reduce){ .pending-tip::before{ animation:none; } }
+
+@media (max-width:760px){
+  body.auth-gate #loginModal{ padding:18px 14px 56px; }
+  body.auth-gate #loginModal .box.login-box{ max-width:100%; }
+  .pending-card{ padding:28px 20px 24px; border-radius:16px; }
+  .pending-ic{ width:56px; height:56px; border-radius:16px; }
+  .pending-card h2{ font-size:18px; }
 }
 
 /* ===== 设置弹窗分区 ===== */

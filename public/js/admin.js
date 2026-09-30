@@ -41,6 +41,8 @@ const confirmDialog = (message, opts = {}) => openDialog({ message, ...opts });
 const alertDialog = (message, opts = {}) => openDialog({ message, single: true, ...opts });
 
 let token = localStorage.getItem('userToken');
+let curTab = 'mine';   // 当前标签，供异步回调（令牌失效）重评估创建分享闸门
+let pendingPoll = null;   // 「等待管理员分配」轮询定时器（分配到门店后自动进入工作台）
 // 登录（弹窗 / 自动登录 / 重新登录）成功后由 login-modal.js 调 __setAdminToken 回写闭包，
 // 否则 token 仍是页面解析时的快照，会导致「改权限」等所有 /api/admin 请求用陈旧 token 失败、弹窗打不开。
 window.__setAdminToken = (t) => { token = t || localStorage.getItem('userToken') || token; };
@@ -67,20 +69,27 @@ async function initUserArea() {
   // 未登录默认隐藏受保护导航项
   if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: false });
   showLogin();
-  if (!userToken) return;
+  // 未登录：整站只显示登录页（app 主体隐藏），不再露出工作台骨架
+  if (!userToken) { enterAuthGate(); return; }
   try {
     const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(userToken), { cache: 'no-store' });
     if (!r.ok) throw new Error('session_invalid');
     const d = await r.json();
     if (d.email) localStorage.setItem('userEmail', d.email);
+    // 已登录但未归属门店（非超管）：只显示「等待管理员设置」页，不进工作台
+    if (!d.isSuper && !d.orgId) { enterPendingGate(d); return; }
+    exitAuthGate();
     showUser(d.email);
     if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: true, isSuper: !!d.isSuper, email: d.email });
   } catch (e) {
-    // 令牌无效：清除并回到登录入口（不跳转、不重载，避免刷新死循环）
+    // 令牌无效：清除并回到登录页（不跳转、不重载，避免刷新死循环）
     localStorage.removeItem('userToken');
     localStorage.removeItem('userEmail');
+    token = null;   // 同步闭包，否则创建分享闸门仍会按“已登录”放行
     showLogin();
     if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: false });
+    if (curTab === 'create') switchTab('create');   // 令牌失效时把创建表单换成登录闸门
+    enterAuthGate();
   }
 }
 initUserArea();
@@ -720,7 +729,9 @@ if (!panelLoaded.mine) { load(); panelLoaded.mine = true; }
 
 // ---------- 店长（组织）后台 ----------
 const orgToken = localStorage.getItem('userToken');
-// 登录后选择所属门店（取代“按邮箱域名自动分配门店”的旧逻辑）
+// 已废弃（保留以便回退）：这套「自助加入门店」不再从界面调用。
+// 新政策 = 未分配账号只看等待页，由管理员在「用户管理」分配门店 + 身份（见 enterPendingGate）。
+// 注意：后端 POST /api/auth/join-org 仍然存在，若要彻底关闭自助加入需另行禁用它。
 async function showStorePicker() {
   let orgs = [];
   try {
@@ -775,16 +786,20 @@ async function initOrg() {
     if (!r.ok) throw new Error('session_invalid');
     meState = await r.json();
   } catch (e) {
-    // 令牌无效：与 initUserArea 保持一致，清除并回到登录态，避免误弹门店选择器
+    // 令牌无效：与 initUserArea 保持一致，清除并回到登录页，避免误弹门店选择器
     localStorage.removeItem('userToken');
     localStorage.removeItem('userEmail');
     showLogin();
     if (typeof window.applyNavVisibility === 'function') window.applyNavVisibility({ loggedIn: false });
+    enterAuthGate();
     return;
   }
   if (!meState || !meState.id) return;
-  // 取消“按邮箱域名自动分配门店”：未归属门店的普通用户，登录后弹出选择门店
-  if (!meState.orgId && !meState.isSuper) { showStorePicker(); }
+  // 未归属门店的普通账号：不再允许自助选门店，改为「等待管理员在用户管理里分配门店 + 身份」
+  if (!meState.orgId && !meState.isSuper) { enterPendingGate(meState); return; }
+  // 创建页门禁重评估：首屏 switchTab('create') 时 meState 还没返回，checkStore() 会误判为
+  // “有门店”而放行（未归属门店也能点「立即分享」，提交才被后端 403）。登录态落地后补一次。
+  if (curTab === 'create' && token) checkStore();
 
   const tabs = $('#tabs');
   tabs.style.display = 'flex';
@@ -801,6 +816,120 @@ async function initOrg() {
     if (d.code) { const c = $('#inviteCode'); c.textContent = '邀请码：' + d.code; c.style.display = 'inline-block'; toast('已生成：' + d.code); }
   });
 }
+
+// ---------- 全站准入：整页登录 / 等待管理员分配 ----------
+// 政策：网站首页即登录页；所有后台功能都必须登录后才能用；新注册账号在管理员
+// 分配「门店 + 身份」之前，只显示一张「等待管理员设置」页。
+//   未登录          → body.auth-gate：隐藏 app 主体，把登录弹窗铺成整页登录页
+//   已登录未分配    → body.pending-on + #pendingGate：等待页（轮询到分配后自动进入）
+// 两处判定都在页面解析早期完成，避免工作台骨架先闪一下再被盖住。
+function enterAuthGate() {
+  document.body.classList.add('auth-gate');
+  document.body.classList.remove('pending-on');
+  const m = document.getElementById('loginModal');
+  if (m) m.classList.add('show');   // 复用登录弹窗的整页呈现（表单逻辑由 login-modal.js 绑定）
+  const em = document.getElementById('loginEmail');
+  if (em) setTimeout(() => em.focus(), 60);
+  if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
+}
+function exitAuthGate() {
+  document.body.classList.remove('auth-gate');
+  const m = document.getElementById('loginModal');
+  if (m) m.classList.remove('show');
+}
+function enterPendingGate(me) {
+  exitAuthGate();
+  const gate = document.getElementById('pendingGate');
+  if (!gate) return;
+  gate.style.display = 'flex';
+  document.body.classList.add('pending-on');
+  const em = document.getElementById('pendingEmail');
+  if (em && me && me.email) em.textContent = me.email;
+  // 15s 轮询：管理员在「用户管理」分配门店/身份后，无需用户手动刷新即可进入工作台
+  if (!pendingPoll) pendingPoll = setInterval(checkPendingAssignment, 15000);
+}
+// 主动查一次归属：已分配到门店（或被提为超管）则整页重载进入工作台；否则返回 false
+async function checkPendingAssignment() {
+  if (!token) return false;
+  try {
+    const r = await fetch('/api/auth/me?userToken=' + encodeURIComponent(token), { cache: 'no-store' });
+    if (!r.ok) return false;
+    const d = await r.json();
+    if (d.isSuper || d.orgId) { location.reload(); return true; }
+  } catch (e) { /* 网络异常忽略，等下次轮询或用户手动刷新 */ }
+  return false;
+}
+(function bindPendingGate() {
+  const gate = document.getElementById('pendingGate');
+  if (!gate) return;
+  const refresh = document.getElementById('pendingRefresh');
+  const out = document.getElementById('pendingLogout');
+  const tip = document.getElementById('pendingTip');
+  if (refresh) refresh.addEventListener('click', async () => {
+    if (refresh.disabled) return;
+    refresh.disabled = true; refresh.textContent = '检查中…';
+    if (tip) { tip.classList.add('busy'); tip.textContent = '正在检查分配状态…'; }
+    const ok = await checkPendingAssignment();
+    if (!ok) {   // 仍未分配：恢复按钮并如实提示，不整页刷新打扰
+      if (tip) { tip.classList.remove('busy'); tip.textContent = '管理员尚未分配，请稍后再试'; }
+      refresh.disabled = false; refresh.textContent = '刷新状态';
+    }
+  });
+  if (out) out.addEventListener('click', logout);
+})();
+
+// ---------- 创建分享登录闸门 ----------
+// 需求：未登录访客不得看到「创建分享」页面（表单本身是公开静态资源，但空表单提交必然 401，
+// 且不该把后台结构摊给未登录的人看）。
+// 判定只读本地 token：同步判定 → 已登录用户零闪烁；令牌失效由 initUserArea 兜底重评估。
+function renderCreateGate() {
+  const gate = document.getElementById('createGate');
+  const shell = document.querySelector('#createPanel .create-shell');
+  if (!gate || !shell) return false;
+  const needLogin = !token;
+  gate.style.display = needLogin ? 'block' : 'none';
+  shell.style.display = needLogin ? 'none' : '';
+  return !needLogin;   // true = 已登录，可以渲染创建表单
+}
+async function gateLogin() {
+  const msg = document.getElementById('cgMsg');
+  const btn = document.getElementById('cgLogin');
+  const email = ((document.getElementById('cgEmail') || {}).value || '').trim();
+  const pw = (document.getElementById('cgPw') || {}).value || '';
+  if (msg) msg.textContent = '';
+  if (!email || !pw) { if (msg) msg.textContent = '请填写邮箱和密码'; return; }
+  if (btn && btn.disabled) return;                    // 防连点重复提交
+  if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
+  try {
+    // 复用 login-modal.js 的登录实现（Supabase / 本地两条路径 + 中文错误映射），不维护第二套登录逻辑
+    const login = window.ayPerformLogin;
+    if (typeof login !== 'function') throw new Error('登录组件未加载，请刷新页面重试');
+    const res = await login(email, pw);
+    localStorage.setItem('userToken', res.token);
+    localStorage.setItem('userEmail', res.email || '');
+    location.reload();   // 与 login-modal.js 一致：整页刷新后登录态才对各面板生效
+  } catch (e) {
+    if (msg) msg.textContent = (e && e.message) || '登录失败，请重试';
+    if (btn) { btn.disabled = false; btn.textContent = '登录'; }
+  }
+}
+(function bindCreateGate() {
+  const btn = document.getElementById('cgLogin');
+  if (!btn) return;
+  btn.addEventListener('click', gateLogin);
+  ['cgEmail', 'cgPw'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') gateLogin(); });
+  });
+  const rg = document.getElementById('cgRegister');
+  if (rg) rg.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!window.openLoginModal) return;
+    window.openLoginModal();
+    const tab = document.getElementById('loginTabReg');   // 直接落到注册页签
+    if (tab) tab.click();
+  });
+})();
 
 // ---------- 全局标签切换（无刷新；创建分享/设置已合并进本页） ----------
 const superTabs = ['allshares', 'stats', 'dashboard', 'users', 'audit', 'stores', 'globals'];
@@ -825,6 +954,7 @@ function switchTab(t) {
   const crumbText = crumbMap[t] || (adminTabs.includes(t) ? '管理后台' : '工作台');
   if (crumb) crumb.textContent = crumbText;
   document.title = '安阅 · ' + crumbText;
+  curTab = t;
   document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
   const btn = document.querySelector(`.tab[data-tab="${t}"]`);
   if (btn) btn.classList.add('active');
@@ -857,8 +987,8 @@ function switchTab(t) {
     if (!panelLoaded.dashboard) { loadDashboard(); panelLoaded.dashboard = true; }
   } else if (t === 'create') {
     $('#createPanel').style.display = 'block';
-    applySharePrefs();
-    checkStore();
+    // 未登录只渲染登录闸门，不进创建表单（也不拉取默认参数，避免 401 请求）
+    if (renderCreateGate()) { applySharePrefs(); checkStore(); }
   } else if (t === 'settings') {
     $('#settingsPanel').style.display = 'block';
     initSettings();

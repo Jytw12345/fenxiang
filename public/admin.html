@@ -86,6 +86,23 @@
 
   <!-- 创建分享面板（无刷新切换） -->
   <div id="createPanel" style="display:none">
+
+   <!-- 登录闸门：未登录访客不渲染创建表单（空表单提交必然 401，且不该看到后台结构）。
+        登录成功后整页 reload，闸门自动让位给下方 .create-shell。 -->
+   <div id="createGate" style="display:none">
+    <div class="tile">
+      <div class="tile-hd"><span class="ic">🔐</span><span class="ttl">登录后创建分享</span></div>
+      <div class="tile-bd">
+        <p class="sub" style="margin:0">创建分享仅对已登录、且归属门店的账号开放。</p>
+        <div class="pfield"><label>邮箱</label><input id="cgEmail" class="inp" placeholder="you@company.com" autocomplete="username" /></div>
+        <div class="pfield"><label>密码</label><input id="cgPw" class="inp" type="password" placeholder="密码" autocomplete="current-password" /></div>
+        <div id="cgMsg" class="sub" style="color:var(--danger);min-height:16px;margin:0;text-align:center"></div>
+        <button class="btn" id="cgLogin" type="button" style="width:100%">登录</button>
+        <p class="sub" style="text-align:center;margin:0">还没有账号？<a href="#" id="cgRegister">注册新账号</a></p>
+      </div>
+    </div>
+   </div>
+
    <div class="create-shell">
     <div class="hero">
       <div class="drop" id="drop">
@@ -380,6 +397,32 @@
       </div>
     </div>
   </div>
+  </div>
+  <footer class="site-beian"><a href="https://beian.miit.gov.cn" target="_blank" rel="noopener">鲁ICP备2026058181号</a></footer>
+</div>
+
+<!-- 整页状态下（登录页 / 待分配页）的备案页脚：固定视口底部，只在 body.auth-gate / body.pending-on 时显示 -->
+<footer class="site-beian auth-beian" id="authBeian"><a href="https://beian.miit.gov.cn" target="_blank" rel="noopener">鲁ICP备2026058181号</a></footer>
+
+<!-- 待管理员分配（门店 / 身份）：已登录、但未归属门店且非超管的账号，只显示本页，
+     app 主体（.side/.main）由 body.pending-on 隐藏。管理员在「用户管理」分配门店后轮询自动放行。 -->
+<div class="pending-gate" id="pendingGate" role="dialog" aria-modal="true" aria-labelledby="pendingTitle">
+  <div class="pending-card">
+    <div class="pending-ic" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 3h10"/><path d="M7 21h10"/>
+        <path d="M8 3v3.2c0 1.2.5 2.3 1.4 3.1L12 12l-2.6 2.7C8.5 15.5 8 16.6 8 17.8V21"/>
+        <path d="M16 3v3.2c0 1.2-.5 2.3-1.4 3.1L12 12l2.6 2.7c.9.8 1.4 1.9 1.4 3.1V21"/>
+      </svg>
+    </div>
+    <h2 id="pendingTitle">等待管理员设置</h2>
+    <p class="sub">账号已创建成功。请等待管理员为您分配<b>门店</b>与<b>身份</b>，分配完成后即可开始创建与分享文件。</p>
+    <div class="pending-acct"><span class="sub">当前账号</span><b id="pendingEmail">—</b></div>
+    <div class="pending-acts">
+      <button class="btn" id="pendingRefresh" type="button">刷新状态</button>
+      <button class="btn ghost" id="pendingLogout" type="button">退出登录</button>
+    </div>
+    <p class="sub pending-tip" id="pendingTip">正在等待管理员处理，分配后会自动进入工作台</p>
   </div>
 </div>
 
